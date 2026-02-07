@@ -1,0 +1,10 @@
+[package]
+name        = "linkpad"
+edition     = { workspace = true }
+license     = { workspace = true }
+version     = { workspace = true }
+
+
+[dependencies]
+makepad-components = { workspace = true, features = ["Button"] }
+makepad-shell      = { workspace = true }

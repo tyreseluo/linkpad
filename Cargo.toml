@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "linkpad",
+    "crates/*"
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Tyrese Luo <tyreseluo@outlook.com>"]
+
+
+[workspace.dependencies]
+linkpad-core       = { path = "crates/core" }
+makepad-components = { git = "https://github.com/Project-Robius-China/makepad-component.git", branch = "main" }
+makepad-shell      = { git = "https://github.com/Project-Robius-China/makepad-shell.git", branch = "main" }
