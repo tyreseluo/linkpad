@@ -7,3 +7,10 @@ license.workspace = true
 description = "Core logic for Linkpad proxy client"
 
 [dependencies]
+reqwest    = { version = "0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }
+serde      = { version = "1.0.228", features = ["derive"] }
+serde_yaml = "0.9.34"
+url        = "2.5.4"
+base64     = "0.22.1"
+percent-encoding = "2.3.2"
+chrono     = "0.4.42"

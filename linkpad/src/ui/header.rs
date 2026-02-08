@@ -2,7 +2,7 @@ use makepad_components::makepad_widgets::*;
 
 live_design! {
     use link::widgets::*;
-    use link::linkpad_theme::*;
+    use crate::ui::style::*;
     use makepad_components::layout::*;
 
     pub Header = <MpLayoutHeader> {

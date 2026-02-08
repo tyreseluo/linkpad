@@ -2,7 +2,7 @@ use makepad_components::makepad_widgets::*;
 
 live_design! {
     use link::widgets::*;
-    use link::linkpad_theme::*;
+    use crate::ui::style::*;
     use makepad_components::button::*;
     use makepad_components::layout::*;
 
@@ -46,6 +46,8 @@ live_design! {
             spacing: (SPACE_2),
 
             menu_profiles = <MenuButton> { text: "Profiles" }
+            menu_proxy_groups = <MenuButton> { text: "Proxy Groups" }
+            menu_rules = <MenuButton> { text: "Rules" }
             menu_settings = <MenuButton> { text: "Settings" }
         }
     }

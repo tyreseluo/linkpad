@@ -1,13 +1,27 @@
+use std::collections::HashMap;
+
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub active_page: Page,
     pub language: Language,
     pub theme: ThemePreference,
+    pub profile_url_input: String,
+    pub import_status: ImportStatus,
+    pub profiles: Vec<ProfileSummary>,
+    pub proxy_groups: Vec<ProxyGroupSummary>,
+    pub proxy_nodes: Vec<ProxyNodeSummary>,
+    pub rules: Vec<String>,
+    pub rules_query: String,
+    pub rules_filter: RuleFilter,
+    pub active_proxy_group: Option<String>,
+    pub proxy_group_selected: HashMap<String, usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Profiles,
+    ProxyGroups,
+    Rules,
     Settings,
 }
 
@@ -24,13 +38,73 @@ pub enum ThemePreference {
     System,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleFilter {
+    All,
+    Domain,
+    IpCidr,
+    ProcessName,
+}
+
+#[derive(Clone, Debug)]
+pub struct ImportStatus {
+    pub message: String,
+    pub is_error: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProfileSummary {
+    pub id: String,
+    pub name: String,
+    pub source: String,
+    pub updated_at: String,
+    pub node_count: usize,
+    pub group_count: usize,
+    pub rule_count: usize,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProxyGroupSummary {
+    pub name: String,
+    pub kind: String,
+    pub size: usize,
+    pub proxies: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProxyNodeSummary {
+    pub name: String,
+    pub kind: String,
+    pub udp: bool,
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self {
             active_page: Page::Profiles,
             language: Language::English,
             theme: ThemePreference::System,
+            profile_url_input: String::new(),
+            import_status: ImportStatus {
+                message: "Ready to import profile URL.".to_string(),
+                is_error: false,
+            },
+            profiles: Vec::new(),
+            proxy_groups: Vec::new(),
+            proxy_nodes: Vec::new(),
+            rules: Vec::new(),
+            rules_query: String::new(),
+            rules_filter: RuleFilter::All,
+            active_proxy_group: None,
+            proxy_group_selected: HashMap::new(),
         }
+    }
+}
+
+impl AppState {
+    pub fn active_profile(&self) -> Option<&ProfileSummary> {
+        self.profiles.iter().find(|profile| profile.active)
     }
 }
 

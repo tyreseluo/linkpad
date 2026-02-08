@@ -6,7 +6,8 @@ version     = { workspace = true }
 
 
 [dependencies]
-makepad-components = { workspace = true, features = ["Button", "Layout", "Card", "Dropdown"] }
+linkpad-core       = { workspace = true }
+makepad-components = { workspace = true, features = ["Button", "Layout", "Card", "Dropdown", "Input"] }
 makepad-shell      = { workspace = true }
 dirs               = "6.0.0"
 serde              = { version = "1.0.228", features = ["derive"] }
