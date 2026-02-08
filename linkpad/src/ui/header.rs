@@ -3,16 +3,19 @@ use makepad_components::makepad_widgets::*;
 live_design! {
     use link::widgets::*;
     use link::linkpad_theme::*;
+    use makepad_components::layout::*;
 
-    pub Header = <View> {
+    pub Header = <MpLayoutHeader> {
         width: Fill,
         height: 56,
         padding: {left: (SPACE_4), right: (SPACE_4)},
         flow: Right,
         align: {y: 0.5},
         spacing: (SPACE_3),
-        show_bg: true,
-        draw_bg: {color: (PANEL_BG)},
+        draw_bg: {
+            bg_color: (PANEL_BG),
+            line_width: 0.0
+        },
 
         title_label = <Label> {
             text: "Profiles",

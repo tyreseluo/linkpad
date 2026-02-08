@@ -1,9 +1,8 @@
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub active_page: Page,
-    pub menu: MenuState,
-    pub profiles: PageContent,
-    pub settings: PageContent,
+    pub language: Language,
+    pub theme: ThemePreference,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,47 +11,59 @@ pub enum Page {
     Settings,
 }
 
-#[derive(Clone, Debug)]
-pub struct MenuState {
-    pub profiles_title: String,
-    pub settings_title: String,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Language {
+    English,
+    SimplifiedChinese,
 }
 
-#[derive(Clone, Debug)]
-pub struct PageContent {
-    pub title: String,
-    pub description: String,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemePreference {
+    Light,
+    Dark,
+    System,
 }
 
 impl Default for AppState {
     fn default() -> Self {
-        Self::mock()
+        Self {
+            active_page: Page::Profiles,
+            language: Language::English,
+            theme: ThemePreference::System,
+        }
     }
 }
 
-impl AppState {
-    pub fn mock() -> Self {
-        Self {
-            active_page: Page::Profiles,
-            menu: MenuState {
-                profiles_title: "Profiles".to_string(),
-                settings_title: "Settings".to_string(),
-            },
-            profiles: PageContent {
-                title: "Profiles".to_string(),
-                description: "Manage subscription profiles, local configs, and sync sources.".to_string(),
-            },
-            settings: PageContent {
-                title: "Settings".to_string(),
-                description: "App preferences, network options, and system integration.".to_string(),
-            },
+impl Language {
+    pub fn from_index(index: usize) -> Self {
+        match index {
+            1 => Self::SimplifiedChinese,
+            _ => Self::English,
         }
     }
 
-    pub fn active_content(&self) -> &PageContent {
-        match self.active_page {
-            Page::Profiles => &self.profiles,
-            Page::Settings => &self.settings,
+    pub fn as_index(self) -> usize {
+        match self {
+            Self::English => 0,
+            Self::SimplifiedChinese => 1,
+        }
+    }
+}
+
+impl ThemePreference {
+    pub fn from_index(index: usize) -> Self {
+        match index {
+            0 => Self::Light,
+            1 => Self::Dark,
+            _ => Self::System,
+        }
+    }
+
+    pub fn as_index(self) -> usize {
+        match self {
+            Self::Light => 0,
+            Self::Dark => 1,
+            Self::System => 2,
         }
     }
 }

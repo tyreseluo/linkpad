@@ -4,6 +4,7 @@ live_design! {
     use link::widgets::*;
     use link::linkpad_theme::*;
     use makepad_components::button::*;
+    use makepad_components::layout::*;
 
     MenuButton = <MpButton> {
         width: Fill,
@@ -23,14 +24,15 @@ live_design! {
         }
     }
 
-    pub Sidebar = <View> {
+    pub Sidebar = <MpLayoutSider> {
         width: (SIDEBAR_WIDTH),
         height: Fill,
         flow: Down,
         spacing: (SPACE_4),
         padding: (SPACE_4),
-        show_bg: true,
-        draw_bg: {color: (SIDEBAR_BG)},
+        draw_bg: {
+            bg_color: (SIDEBAR_BG)
+        },
 
         brand = <Label> {
             text: "Linkpad",

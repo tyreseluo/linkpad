@@ -1,7 +1,7 @@
 use makepad_components::makepad_widgets::*;
 
 live_design! {
-    link linkpad_theme_default;
+    link linkpad_theme;
     use link::theme::*;
 
     // Colors
