@@ -12,10 +12,12 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
+use tracing::{info, warn};
 
 const DEFAULT_KERNEL_BINARY: &str = "mihomo";
 const RUNTIME_CONFIG_FILE: &str = "runtime.yaml";
 const RUNTIME_LOG_FILE: &str = "mihomo.log";
+const RUNTIME_PID_FILE: &str = "mihomo.pid";
 const MIHOMO_RELEASE_API: &str = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest";
 const MIHOMO_RELEASE_LATEST_PAGE: &str = "https://github.com/MetaCubeX/mihomo/releases/latest";
 const LINKPAD_HTTP_USER_AGENT: &str = "linkpad-core/0.1";
@@ -78,6 +80,7 @@ impl KernelRuntime {
         }
 
         self.ensure_runtime_dir()?;
+        self.cleanup_stale_kernel_processes()?;
         let config_path = self.config_path();
         fs::write(&config_path, config_yaml)
             .map_err(|error| CoreError::InvalidConfig(error.to_string()))?;
@@ -103,19 +106,23 @@ impl KernelRuntime {
                 kernel_binary.display()
             ))
         })?;
+        let child_pid = child.id();
 
         thread::sleep(Duration::from_millis(400));
         if let Some(status) = child
             .try_wait()
             .map_err(|error| CoreError::InvalidConfig(error.to_string()))?
         {
+            self.remove_pid_file();
             return Err(CoreError::InvalidConfig(format!(
                 "mihomo exited early with status {status}; check {}",
                 self.log_path().display()
             )));
         }
 
+        self.write_pid_file(child_pid)?;
         self.child = Some(child);
+        info!("started mihomo runtime pid={child_pid}");
         Ok(())
     }
 
@@ -124,6 +131,8 @@ impl KernelRuntime {
             let _ = child.kill();
             let _ = child.wait();
         }
+        let _ = self.cleanup_stale_kernel_processes();
+        self.remove_pid_file();
         Ok(())
     }
 
@@ -135,11 +144,13 @@ impl KernelRuntime {
         match child.try_wait() {
             Ok(Some(_)) => {
                 self.child = None;
+                self.remove_pid_file();
                 false
             }
             Ok(None) => true,
             Err(_) => {
                 self.child = None;
+                self.remove_pid_file();
                 false
             }
         }
@@ -239,12 +250,55 @@ impl KernelRuntime {
         self.runtime_dir.join(RUNTIME_LOG_FILE)
     }
 
+    fn pid_path(&self) -> PathBuf {
+        self.runtime_dir.join(RUNTIME_PID_FILE)
+    }
+
     fn open_log_file(&self) -> CoreResult<File> {
         OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.log_path())
             .map_err(|error| CoreError::InvalidConfig(error.to_string()))
+    }
+
+    fn write_pid_file(&self, pid: u32) -> CoreResult<()> {
+        fs::write(self.pid_path(), format!("{pid}\n"))
+            .map_err(|error| CoreError::InvalidConfig(error.to_string()))
+    }
+
+    fn remove_pid_file(&self) {
+        let _ = fs::remove_file(self.pid_path());
+    }
+
+    fn find_managed_kernel_pids(&self) -> Vec<u32> {
+        let mut pids = BTreeSet::new();
+        if let Ok(raw_pid) = fs::read_to_string(self.pid_path()) {
+            if let Ok(pid) = raw_pid.trim().parse::<u32>() {
+                if is_runtime_mihomo_pid(pid, &self.runtime_dir, &self.config_path()) {
+                    pids.insert(pid);
+                }
+            }
+        }
+        for pid in list_runtime_mihomo_processes(&self.runtime_dir, &self.config_path()) {
+            pids.insert(pid);
+        }
+        pids.into_iter().collect()
+    }
+
+    fn cleanup_stale_kernel_processes(&self) -> CoreResult<()> {
+        let stale_pids = self.find_managed_kernel_pids();
+        if stale_pids.is_empty() {
+            self.remove_pid_file();
+            return Ok(());
+        }
+
+        for pid in stale_pids {
+            warn!("terminating stale mihomo process pid={pid}");
+            terminate_process(pid)?;
+        }
+        self.remove_pid_file();
+        Ok(())
     }
 
     fn resolve_kernel_binary(&self) -> CoreResult<PathBuf> {
@@ -351,6 +405,12 @@ impl KernelRuntime {
             return preferred.join(platform_kernel_binary_name());
         }
         preferred
+    }
+}
+
+impl Drop for KernelRuntime {
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }
 
@@ -614,6 +674,100 @@ fn decompress_gzip(bytes: &[u8]) -> CoreResult<Vec<u8>> {
         ));
     }
     Ok(output)
+}
+
+#[cfg(unix)]
+fn list_runtime_mihomo_processes(runtime_dir: &Path, config_path: &Path) -> Vec<u32> {
+    let output = match Command::new("ps").args(["-axo", "pid=,command="]).output() {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+    let runtime_marker = runtime_dir.display().to_string();
+    let config_marker = config_path.display().to_string();
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            let mut parts = trimmed.splitn(2, char::is_whitespace);
+            let pid = parts.next()?.trim().parse::<u32>().ok()?;
+            let command = parts.next()?.trim();
+            if !command.contains("mihomo") {
+                return None;
+            }
+            if !command.contains(&runtime_marker) || !command.contains(&config_marker) {
+                return None;
+            }
+            Some(pid)
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn is_runtime_mihomo_pid(pid: u32, runtime_dir: &Path, config_path: &Path) -> bool {
+    let pid_arg = pid.to_string();
+    let output = match Command::new("ps")
+        .args(["-p", &pid_arg, "-o", "command="])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return false,
+    };
+    let command = String::from_utf8_lossy(&output.stdout);
+    let runtime_marker = runtime_dir.display().to_string();
+    let config_marker = config_path.display().to_string();
+    command.contains("mihomo")
+        && command.contains(&runtime_marker)
+        && command.contains(&config_marker)
+}
+
+#[cfg(not(unix))]
+fn is_runtime_mihomo_pid(_pid: u32, _runtime_dir: &Path, _config_path: &Path) -> bool {
+    false
+}
+
+#[cfg(not(unix))]
+fn list_runtime_mihomo_processes(_runtime_dir: &Path, _config_path: &Path) -> Vec<u32> {
+    Vec::new()
+}
+
+#[cfg(unix)]
+fn terminate_process(pid: u32) -> CoreResult<()> {
+    let pid_str = pid.to_string();
+    let _ = Command::new("kill").arg("-TERM").arg(&pid_str).status();
+    for _ in 0..12 {
+        if !process_exists(pid) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let _ = Command::new("kill").arg("-KILL").arg(&pid_str).status();
+    for _ in 0..12 {
+        if !process_exists(pid) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    Err(CoreError::InvalidConfig(format!(
+        "failed to terminate stale mihomo process pid={pid}"
+    )))
+}
+
+#[cfg(not(unix))]
+fn terminate_process(_pid: u32) -> CoreResult<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(unix)]

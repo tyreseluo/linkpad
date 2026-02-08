@@ -108,30 +108,24 @@ impl Core {
 
     pub fn start(&self) -> CoreResult<()> {
         info!("core start requested");
-        let (config, active_profile) = {
-            let mut state = self.inner.lock().expect("core state poisoned");
-            if state.running && state.kernel_runtime.is_running() {
-                warn!("core start skipped: already running");
-                return Err(CoreError::AlreadyRunning);
-            }
-            state.running = false;
-            (
-                state.config.clone(),
-                state
-                    .profiles
-                    .iter()
-                    .find(|profile| profile.active)
-                    .cloned(),
-            )
-        };
+        let mut state = self.inner.lock().expect("core state poisoned");
+        if state.running && state.kernel_runtime.is_running() {
+            warn!("core start skipped: already running");
+            return Err(CoreError::AlreadyRunning);
+        }
+        state.running = false;
 
-        let active_profile = active_profile.ok_or_else(|| {
-            CoreError::InvalidConfig("no active profile to launch mihomo".to_string())
-        })?;
+        let config = state.config.clone();
+        let active_profile = state
+            .profiles
+            .iter()
+            .find(|profile| profile.active)
+            .cloned()
+            .ok_or_else(|| {
+                CoreError::InvalidConfig("no active profile to launch mihomo".to_string())
+            })?;
         let runtime_config = build_runtime_config_from_profile(&active_profile, &config)?;
         let controller = extract_controller_config(&runtime_config)?;
-
-        let mut state = self.inner.lock().expect("core state poisoned");
         state.kernel_runtime.start(&runtime_config)?;
         state.running = true;
         state.controller = Some(controller);
@@ -143,6 +137,7 @@ impl Core {
         info!("core stop requested");
         let mut state = self.inner.lock().expect("core state poisoned");
         if !state.running && !state.kernel_runtime.is_running() {
+            let _ = state.kernel_runtime.stop();
             warn!("core stop skipped: not running");
             return Err(CoreError::NotRunning);
         }
