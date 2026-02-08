@@ -43,7 +43,7 @@ impl App {
             }
 
             let strings = i18n::strings(self.state.language);
-            let icon_bytes: &[u8] = include_bytes!("../assets/tray.png");
+            let icon_bytes: &[u8] = include_bytes!("../resources/tray.png");
             let icon = TrayIcon::from_png_bytes(icon_bytes.to_vec()).with_template(true);
             let model =
                 TrayModel::new(icon, self.build_tray_menu(strings)).with_tooltip(strings.app_name);

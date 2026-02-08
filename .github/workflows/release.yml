@@ -1,0 +1,113 @@
+name: Linkpad Release (macOS Apple Silicon)
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "v*.*.*-*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag (optional, defaults to v<linkpad_version>)"
+        required: false
+        type: string
+        default: ""
+      prerelease:
+        description: "Mark release as prerelease"
+        required: false
+        type: boolean
+        default: false
+      draft:
+        description: "Create draft release"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve_release:
+    name: Resolve Release Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      name: ${{ steps.meta.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve tag/name and validate version
+        id: meta
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name=="linkpad") | .version')
+          if [[ -z "$VERSION" || "$VERSION" == "null" ]]; then
+            echo "Failed to resolve linkpad version."
+            exit 1
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          elif [[ -n "${{ github.event.inputs.release_tag }}" ]]; then
+            TAG="${{ github.event.inputs.release_tag }}"
+          else
+            TAG="v${VERSION}"
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "$TAG" != "v${VERSION}" ]]; then
+            echo "Tag '${TAG}' does not match linkpad version 'v${VERSION}'."
+            exit 1
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "name=Linkpad ${TAG}" >> "$GITHUB_OUTPUT"
+
+  create_release:
+    name: Create GitHub Release
+    needs: resolve_release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create release
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve_release.outputs.tag }}
+          name: ${{ needs.resolve_release.outputs.name }}
+          draft: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.draft == 'true' }}
+          prerelease: ${{ (github.event_name == 'push' && contains(github.ref_name, '-')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.prerelease == 'true') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  package_macos_arm64:
+    name: Package macOS arm64 (.dmg)
+    needs: [resolve_release, create_release]
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and package
+        uses: Project-Robius-China/makepad-packaging-action@main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          project_path: linkpad
+          packager_formats: dmg
+          releaseId: ${{ needs.create_release.outputs.release_id }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}

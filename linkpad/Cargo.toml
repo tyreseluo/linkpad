@@ -14,3 +14,24 @@ serde              = { workspace = true }
 serde_json         = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[package.metadata.packager]
+product_name = "Linkpad"
+identifier = "io.linkpad.app"
+category = "Utility"
+before_each_package_command = "robius-packaging-commands before-each-package --binary-name linkpad --path-to-binary ../target/release/linkpad"
+resources = [
+    # Makepad resources
+    { src = "./dist/resources/makepad_widgets", target = "makepad_widgets" },
+    { src = "./dist/resources/makepad_fonts_chinese_bold", target = "makepad_fonts_chinese_bold" },
+    { src = "./dist/resources/makepad_fonts_chinese_bold_2", target = "makepad_fonts_chinese_bold_2" },
+    { src = "./dist/resources/makepad_fonts_chinese_regular", target = "makepad_fonts_chinese_regular" },
+    { src = "./dist/resources/makepad_fonts_chinese_regular_2", target = "makepad_fonts_chinese_regular_2" },
+    { src = "./dist/resources/makepad_fonts_emoji", target = "makepad_fonts_emoji" },
+    # Linkpad resources
+    { src = "./dist/resources/linkpad", target = "linkpad" },
+]
+out_dir = "./dist"
+
+[package.metadata.packager.macos]
+signing_identity = "-"
