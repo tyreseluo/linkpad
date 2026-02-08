@@ -1,7 +1,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose;
-use chrono::Local;
-use percent_encoding::percent_decode_str;
+use chrono::{Local, NaiveDateTime};
+use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
@@ -9,10 +9,11 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::{error, info, warn};
 
 mod runtime;
-pub use runtime::KernelInfo;
-use runtime::{KernelRuntime, SystemProxyManager};
+pub use runtime::{KernelInfo, KernelUpgradeInfo, StartupStatus};
+use runtime::{KernelRuntime, StartupManager, SystemProxyManager};
 
 pub type CoreResult<T> = Result<T, CoreError>;
 
@@ -55,7 +56,41 @@ struct CoreState {
     profiles: Vec<Profile>,
     kernel_runtime: KernelRuntime,
     system_proxy_manager: SystemProxyManager,
+    startup_manager: StartupManager,
     system_proxy_enabled: bool,
+    controller: Option<ControllerConfig>,
+}
+
+#[derive(Clone, Debug)]
+struct ControllerConfig {
+    base_url: String,
+    secret: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControllerProxyListResponse {
+    #[serde(default)]
+    proxies: BTreeMap<String, ControllerProxyState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControllerProxyState {
+    #[serde(default)]
+    now: String,
+    #[serde(default)]
+    all: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControllerDelayResponse {
+    #[serde(default)]
+    delay: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControllerRuntimeConfigResponse {
+    #[serde(default)]
+    mode: String,
 }
 
 impl Default for Core {
@@ -72,9 +107,11 @@ impl Core {
     }
 
     pub fn start(&self) -> CoreResult<()> {
+        info!("core start requested");
         let (config, active_profile) = {
             let mut state = self.inner.lock().expect("core state poisoned");
             if state.running && state.kernel_runtime.is_running() {
+                warn!("core start skipped: already running");
                 return Err(CoreError::AlreadyRunning);
             }
             state.running = false;
@@ -92,16 +129,21 @@ impl Core {
             CoreError::InvalidConfig("no active profile to launch mihomo".to_string())
         })?;
         let runtime_config = build_runtime_config_from_profile(&active_profile, &config)?;
+        let controller = extract_controller_config(&runtime_config)?;
 
         let mut state = self.inner.lock().expect("core state poisoned");
         state.kernel_runtime.start(&runtime_config)?;
         state.running = true;
+        state.controller = Some(controller);
+        info!("core started");
         Ok(())
     }
 
     pub fn stop(&self) -> CoreResult<()> {
+        info!("core stop requested");
         let mut state = self.inner.lock().expect("core state poisoned");
         if !state.running && !state.kernel_runtime.is_running() {
+            warn!("core stop skipped: not running");
             return Err(CoreError::NotRunning);
         }
 
@@ -111,6 +153,8 @@ impl Core {
         }
         state.kernel_runtime.stop()?;
         state.running = false;
+        state.controller = None;
+        info!("core stopped");
         Ok(())
     }
 
@@ -124,6 +168,7 @@ impl Core {
         if state.running && !state.kernel_runtime.is_running() {
             state.running = false;
             state.system_proxy_enabled = false;
+            state.controller = None;
         }
         state.running
     }
@@ -149,10 +194,48 @@ impl Core {
         state.kernel_runtime.kernel_info()
     }
 
+    pub fn verify_kernel_binary(&self) -> CoreResult<KernelInfo> {
+        let info = self.kernel_info();
+        if info.binary_path.is_some() {
+            Ok(info)
+        } else {
+            Err(CoreError::InvalidConfig(info.status))
+        }
+    }
+
+    pub fn upgrade_kernel_binary(&self) -> CoreResult<KernelUpgradeInfo> {
+        let state = self.inner.lock().expect("core state poisoned");
+        state.kernel_runtime.install_latest_kernel()
+    }
+
+    pub fn restart_kernel_runtime(&self) -> CoreResult<()> {
+        if self.is_system_proxy_enabled() {
+            self.disable_system_proxy()?;
+            return self.enable_system_proxy();
+        }
+
+        if self.is_running() {
+            let _ = self.stop();
+        }
+        self.start()
+    }
+
+    pub fn configure_startup(&self, auto_launch: bool, silent_start: bool) -> CoreResult<()> {
+        let state = self.inner.lock().expect("core state poisoned");
+        state.startup_manager.configure(auto_launch, silent_start)
+    }
+
+    pub fn startup_status(&self) -> CoreResult<StartupStatus> {
+        let state = self.inner.lock().expect("core state poisoned");
+        state.startup_manager.status()
+    }
+
     pub fn enable_system_proxy(&self) -> CoreResult<()> {
+        info!("enable system proxy requested");
         let port = {
             let state = self.inner.lock().expect("core state poisoned");
             if state.system_proxy_enabled {
+                info!("system proxy already enabled");
                 return Ok(());
             }
             state.config.mixed_port
@@ -169,9 +252,11 @@ impl Core {
         match state.system_proxy_manager.enable("127.0.0.1", port) {
             Ok(()) => {
                 state.system_proxy_enabled = true;
+                info!("system proxy enabled on 127.0.0.1:{port}");
                 Ok(())
             }
             Err(error) => {
+                error!("enable system proxy failed: {error}");
                 if started_here {
                     let _ = state.kernel_runtime.stop();
                     state.running = false;
@@ -182,20 +267,174 @@ impl Core {
     }
 
     pub fn disable_system_proxy(&self) -> CoreResult<()> {
+        info!("disable system proxy requested");
         let mut state = self.inner.lock().expect("core state poisoned");
         if state.system_proxy_enabled {
             state.system_proxy_manager.disable()?;
             state.system_proxy_enabled = false;
+            info!("system proxy disabled");
         }
 
         if state.running {
             state.kernel_runtime.stop()?;
             state.running = false;
+            info!("kernel stopped after disabling system proxy");
         }
+        state.controller = None;
         Ok(())
     }
 
+    pub fn probe_proxy_delay(&self, proxy_name: &str) -> CoreResult<Option<u32>> {
+        if proxy_name.trim().is_empty() {
+            return Err(CoreError::InvalidConfig(
+                "proxy name cannot be empty".to_string(),
+            ));
+        }
+
+        if !self.is_running() {
+            self.start()?;
+        }
+
+        let controller = {
+            let mut state = self.inner.lock().expect("core state poisoned");
+            if !state.running || !state.kernel_runtime.is_running() {
+                state.running = false;
+                state.controller = None;
+                return Err(CoreError::NotRunning);
+            }
+            state.controller.clone().ok_or_else(|| {
+                CoreError::InvalidConfig("controller endpoint is not configured".to_string())
+            })?
+        };
+
+        fetch_proxy_delay_from_controller(
+            &controller,
+            proxy_name,
+            DEFAULT_DELAY_TEST_URL,
+            DEFAULT_DELAY_TIMEOUT_MS,
+        )
+    }
+
+    pub fn probe_proxy_delays(&self, proxy_names: &[String]) -> CoreResult<BTreeMap<String, Option<u32>>> {
+        if proxy_names.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        if !self.is_running() {
+            self.start()?;
+        }
+
+        let controller = {
+            let mut state = self.inner.lock().expect("core state poisoned");
+            if !state.running || !state.kernel_runtime.is_running() {
+                state.running = false;
+                state.controller = None;
+                return Err(CoreError::NotRunning);
+            }
+            state.controller.clone().ok_or_else(|| {
+                CoreError::InvalidConfig("controller endpoint is not configured".to_string())
+            })?
+        };
+
+        fetch_proxy_delays_from_controller(&controller, proxy_names)
+    }
+
+    pub fn select_proxy(&self, group_name: &str, proxy_name: &str) -> CoreResult<()> {
+        info!("select proxy requested: group={group_name}, proxy={proxy_name}");
+        validate_proxy_selection(self.active_profile(), group_name, proxy_name)?;
+
+        if !self.is_running() {
+            self.start()?;
+        }
+
+        let controller = {
+            let mut state = self.inner.lock().expect("core state poisoned");
+            if !state.running || !state.kernel_runtime.is_running() {
+                return Err(CoreError::NotRunning);
+            }
+            state.controller.clone().ok_or_else(|| {
+                CoreError::InvalidConfig("controller endpoint is not configured".to_string())
+            })?
+        };
+
+        send_proxy_selection_request(&controller, group_name, proxy_name)
+    }
+
+    pub fn current_proxy_group_selections(&self) -> CoreResult<BTreeMap<String, String>> {
+        let controller = {
+            let mut state = self.inner.lock().expect("core state poisoned");
+            if !state.running || !state.kernel_runtime.is_running() {
+                state.running = false;
+                state.controller = None;
+                return Ok(BTreeMap::new());
+            }
+            state.controller.clone().ok_or_else(|| {
+                CoreError::InvalidConfig("controller endpoint is not configured".to_string())
+            })?
+        };
+
+        fetch_proxy_selection_map_from_controller(&controller)
+    }
+
+    pub fn set_mode(&self, mode: ProxyMode) -> CoreResult<()> {
+        info!("set mode requested: {:?}", mode);
+        let (controller, previous_mode) = {
+            let mut state = self.inner.lock().expect("core state poisoned");
+            let previous_mode = state.config.mode;
+            if previous_mode == mode {
+                info!("set mode skipped: already {:?}", mode);
+                return Ok(());
+            }
+            state.config.mode = mode;
+
+            if !state.running || !state.kernel_runtime.is_running() {
+                state.running = false;
+                state.controller = None;
+                return Ok(());
+            }
+
+            (state.controller.clone(), previous_mode)
+        };
+
+        let Some(controller) = controller else {
+            return Ok(());
+        };
+
+        if let Err(error) = send_mode_update_request(&controller, mode) {
+            let mut state = self.inner.lock().expect("core state poisoned");
+            state.config.mode = previous_mode;
+            error!("set mode failed: {error}");
+            return Err(error);
+        }
+
+        info!("set mode succeeded: {:?}", mode);
+        Ok(())
+    }
+
+    pub fn current_mode(&self) -> CoreResult<ProxyMode> {
+        let (controller, fallback_mode) = {
+            let mut state = self.inner.lock().expect("core state poisoned");
+            let fallback_mode = state.config.mode;
+            if !state.running || !state.kernel_runtime.is_running() {
+                state.running = false;
+                state.controller = None;
+                return Ok(fallback_mode);
+            }
+            (state.controller.clone(), fallback_mode)
+        };
+
+        let Some(controller) = controller else {
+            return Ok(fallback_mode);
+        };
+
+        let mode = fetch_mode_from_controller(&controller)?;
+        let mut state = self.inner.lock().expect("core state poisoned");
+        state.config.mode = mode;
+        Ok(mode)
+    }
+
     pub fn import_profile_url(&self, source_url: &str, set_active: bool) -> CoreResult<Profile> {
+        info!("import profile requested");
         let content = fetch_profile_content(source_url)?;
         let parsed = parse_profile_yaml(source_url, &content)?;
 
@@ -231,6 +470,10 @@ impl Core {
                 item.active = item.id == profile.id;
             }
         }
+        info!(
+            "profile imported: name={}, nodes={}, groups={}, rules={}",
+            profile.name, profile.node_count, profile.group_count, profile.rule_count
+        );
 
         state
             .profiles
@@ -241,6 +484,7 @@ impl Core {
     }
 
     pub fn refresh_profile(&self, id: &str) -> CoreResult<Profile> {
+        info!("refresh profile requested: id={id}");
         let existing = {
             let state = self.inner.lock().expect("core state poisoned");
             state
@@ -275,6 +519,14 @@ impl Core {
             rules: parsed.rules,
             raw_yaml: content,
         };
+        info!(
+            "profile refreshed: id={}, name={}, nodes={}, groups={}, rules={}",
+            state.profiles[index].id,
+            state.profiles[index].name,
+            state.profiles[index].node_count,
+            state.profiles[index].group_count,
+            state.profiles[index].rule_count
+        );
 
         Ok(state.profiles[index].clone())
     }
@@ -354,6 +606,10 @@ impl Core {
             return;
         }
 
+        for profile in &mut profiles {
+            profile.updated_at = normalize_profile_updated_at(&profile.updated_at);
+        }
+
         let mut found_active = false;
         for profile in &mut profiles {
             if profile.active {
@@ -392,7 +648,7 @@ impl Default for Config {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProxyMode {
     Rule,
     Global,
@@ -885,6 +1141,27 @@ fn profile_name_from_subscription(source_url: &str, nodes: &[SubscriptionNode]) 
     "imported-subscription".to_string()
 }
 
+fn validate_proxy_selection(
+    active_profile: Option<Profile>,
+    group_name: &str,
+    proxy_name: &str,
+) -> CoreResult<()> {
+    let profile = active_profile.ok_or_else(|| {
+        CoreError::InvalidConfig("no active profile to select proxy".to_string())
+    })?;
+    let group = profile
+        .proxy_groups
+        .iter()
+        .find(|group| group.name == group_name)
+        .ok_or_else(|| CoreError::InvalidConfig(format!("proxy group `{group_name}` not found")))?;
+    if !group.proxies.iter().any(|name| name == proxy_name) {
+        return Err(CoreError::InvalidConfig(format!(
+            "proxy `{proxy_name}` not found in group `{group_name}`"
+        )));
+    }
+    Ok(())
+}
+
 fn build_runtime_config_from_profile(profile: &Profile, config: &Config) -> CoreResult<String> {
     let profile_yaml = if profile.raw_yaml.trim().is_empty() {
         fetch_profile_content(&profile.source_url)?
@@ -892,6 +1169,324 @@ fn build_runtime_config_from_profile(profile: &Profile, config: &Config) -> Core
         profile.raw_yaml.clone()
     };
     build_runtime_config_yaml(&profile_yaml, config)
+}
+
+fn extract_controller_config(runtime_config_yaml: &str) -> CoreResult<ControllerConfig> {
+    let root_value: serde_yaml::Value = serde_yaml::from_str(runtime_config_yaml)
+        .map_err(|error| CoreError::Parse(error.to_string()))?;
+    let root = root_value.as_mapping().ok_or_else(|| {
+        CoreError::InvalidConfig("mihomo config root must be a YAML mapping".to_string())
+    })?;
+
+    let controller = root
+        .get(serde_yaml::Value::String("external-controller".to_string()))
+        .and_then(serde_yaml::Value::as_str)
+        .unwrap_or("127.0.0.1:9097");
+    let base_url = normalize_controller_url(controller)?;
+
+    let secret = root
+        .get(serde_yaml::Value::String("secret".to_string()))
+        .and_then(serde_yaml::Value::as_str)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    Ok(ControllerConfig { base_url, secret })
+}
+
+fn normalize_controller_url(raw: &str) -> CoreResult<String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err(CoreError::InvalidConfig(
+            "external-controller is empty".to_string(),
+        ));
+    }
+    let with_scheme = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    };
+    let parsed = url::Url::parse(&with_scheme)
+        .map_err(|error| CoreError::InvalidConfig(format!("invalid external-controller: {error}")))?;
+    let mut normalized = parsed.to_string();
+    if normalized.ends_with('/') {
+        normalized.pop();
+    }
+    Ok(normalized)
+}
+
+fn send_proxy_selection_request(
+    controller: &ControllerConfig,
+    group_name: &str,
+    proxy_name: &str,
+) -> CoreResult<()> {
+    let encoded_group = utf8_percent_encode(group_name, NON_ALPHANUMERIC).to_string();
+    let endpoint = format!("{}/proxies/{}", controller.base_url, encoded_group);
+    let body = format!(
+        "{{\"name\":\"{}\"}}",
+        proxy_name
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+    );
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+
+    let mut request = client
+        .put(&endpoint)
+        .header("Content-Type", "application/json")
+        .body(body);
+    if let Some(secret) = controller.secret.as_ref() {
+        request = request.bearer_auth(secret);
+    }
+
+    let response = request
+        .send()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+
+    let status = response.status();
+    let detail = response.text().unwrap_or_default();
+    let detail = detail.trim();
+    if detail.is_empty() {
+        Err(CoreError::InvalidConfig(format!(
+            "controller request failed: {status}"
+        )))
+    } else {
+        Err(CoreError::InvalidConfig(format!(
+            "controller request failed: {status} {detail}"
+        )))
+    }
+}
+
+fn fetch_proxy_selection_map_from_controller(
+    controller: &ControllerConfig,
+) -> CoreResult<BTreeMap<String, String>> {
+    let endpoint = format!("{}/proxies", controller.base_url);
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+
+    let mut request = client.get(&endpoint);
+    if let Some(secret) = controller.secret.as_ref() {
+        request = request.bearer_auth(secret);
+    }
+
+    let response = request
+        .send()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+    if !status.is_success() {
+        let detail = body.trim();
+        if detail.is_empty() {
+            return Err(CoreError::InvalidConfig(format!(
+                "controller request failed: {status}"
+            )));
+        }
+        return Err(CoreError::InvalidConfig(format!(
+            "controller request failed: {status} {detail}"
+        )));
+    }
+
+    parse_proxy_selection_map_response(&body)
+}
+
+fn send_mode_update_request(controller: &ControllerConfig, mode: ProxyMode) -> CoreResult<()> {
+    let endpoint = format!("{}/configs", controller.base_url);
+    let body = format!("{{\"mode\":\"{}\"}}", proxy_mode_name(&mode));
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+
+    let mut request = client
+        .patch(&endpoint)
+        .header("Content-Type", "application/json")
+        .body(body);
+    if let Some(secret) = controller.secret.as_ref() {
+        request = request.bearer_auth(secret);
+    }
+
+    let response = request
+        .send()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+
+    let status = response.status();
+    let detail = response.text().unwrap_or_default();
+    let detail = detail.trim();
+    if detail.is_empty() {
+        Err(CoreError::InvalidConfig(format!(
+            "controller request failed: {status}"
+        )))
+    } else {
+        Err(CoreError::InvalidConfig(format!(
+            "controller request failed: {status} {detail}"
+        )))
+    }
+}
+
+fn fetch_mode_from_controller(controller: &ControllerConfig) -> CoreResult<ProxyMode> {
+    let endpoint = format!("{}/configs", controller.base_url);
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+
+    let mut request = client.get(&endpoint);
+    if let Some(secret) = controller.secret.as_ref() {
+        request = request.bearer_auth(secret);
+    }
+
+    let response = request
+        .send()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+    if !status.is_success() {
+        let detail = body.trim();
+        if detail.is_empty() {
+            return Err(CoreError::InvalidConfig(format!(
+                "controller request failed: {status}"
+            )));
+        }
+        return Err(CoreError::InvalidConfig(format!(
+            "controller request failed: {status} {detail}"
+        )));
+    }
+
+    parse_mode_response(&body)
+}
+
+const DEFAULT_DELAY_TEST_URL: &str = "http://www.gstatic.com/generate_204";
+const DEFAULT_DELAY_TIMEOUT_MS: u32 = 4_000;
+
+fn fetch_proxy_delays_from_controller(
+    controller: &ControllerConfig,
+    proxy_names: &[String],
+) -> CoreResult<BTreeMap<String, Option<u32>>> {
+    let mut result = BTreeMap::new();
+    let mut success_count = 0usize;
+    let mut last_error: Option<CoreError> = None;
+
+    for proxy_name in proxy_names {
+        match fetch_proxy_delay_from_controller(
+            controller,
+            proxy_name,
+            DEFAULT_DELAY_TEST_URL,
+            DEFAULT_DELAY_TIMEOUT_MS,
+        ) {
+            Ok(delay) => {
+                if delay.is_some() {
+                    success_count += 1;
+                }
+                result.insert(proxy_name.clone(), delay);
+            }
+            Err(error) => {
+                last_error = Some(error);
+                result.insert(proxy_name.clone(), None);
+            }
+        }
+    }
+
+    if success_count == 0 {
+        if let Some(error) = last_error {
+            return Err(error);
+        }
+    }
+
+    Ok(result)
+}
+
+fn fetch_proxy_delay_from_controller(
+    controller: &ControllerConfig,
+    proxy_name: &str,
+    url: &str,
+    timeout_ms: u32,
+) -> CoreResult<Option<u32>> {
+    let encoded_proxy = utf8_percent_encode(proxy_name, NON_ALPHANUMERIC).to_string();
+    let encoded_url = utf8_percent_encode(url, NON_ALPHANUMERIC).to_string();
+    let endpoint = format!(
+        "{}/proxies/{}/delay?url={}&timeout={}",
+        controller.base_url, encoded_proxy, encoded_url, timeout_ms
+    );
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+
+    let mut request = client.get(&endpoint);
+    if let Some(secret) = controller.secret.as_ref() {
+        request = request.bearer_auth(secret);
+    }
+
+    let response = request
+        .send()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+    if !status.is_success() {
+        return Ok(None);
+    }
+
+    parse_delay_response(&body)
+}
+
+fn parse_proxy_selection_map_response(body: &str) -> CoreResult<BTreeMap<String, String>> {
+    let payload: ControllerProxyListResponse =
+        serde_json::from_str(body).map_err(|error| CoreError::Parse(error.to_string()))?;
+
+    let mut selections = BTreeMap::new();
+    for (group_name, state) in payload.proxies {
+        let now = state.now.trim();
+        if now.is_empty() {
+            continue;
+        }
+        if state.all.is_empty() || state.all.iter().any(|item| item == now) {
+            selections.insert(group_name, now.to_string());
+        }
+    }
+    Ok(selections)
+}
+
+fn parse_mode_response(body: &str) -> CoreResult<ProxyMode> {
+    let payload: ControllerRuntimeConfigResponse =
+        serde_json::from_str(body).map_err(|error| CoreError::Parse(error.to_string()))?;
+    parse_proxy_mode(&payload.mode).ok_or_else(|| {
+        CoreError::Parse(format!(
+            "invalid mode in controller response: {}",
+            payload.mode
+        ))
+    })
+}
+
+fn parse_delay_response(body: &str) -> CoreResult<Option<u32>> {
+    let payload: ControllerDelayResponse =
+        serde_json::from_str(body).map_err(|error| CoreError::Parse(error.to_string()))?;
+    if payload.delay < 0 {
+        return Ok(None);
+    }
+
+    let delay = u32::try_from(payload.delay)
+        .map_err(|_| CoreError::Parse(format!("invalid delay value: {}", payload.delay)))?;
+    Ok(Some(delay))
 }
 
 fn build_runtime_config_yaml(profile_yaml: &str, config: &Config) -> CoreResult<String> {
@@ -935,6 +1530,15 @@ fn proxy_mode_name(mode: &ProxyMode) -> &'static str {
     }
 }
 
+fn parse_proxy_mode(value: &str) -> Option<ProxyMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "rule" => Some(ProxyMode::Rule),
+        "global" => Some(ProxyMode::Global),
+        "direct" => Some(ProxyMode::Direct),
+        _ => None,
+    }
+}
+
 fn build_profile_id(source_url: &str) -> String {
     let seconds = now_unix_seconds();
     let mut hasher = DefaultHasher::new();
@@ -951,6 +1555,15 @@ fn now_unix_seconds() -> u64 {
 
 fn current_local_timestamp() -> String {
     Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn normalize_profile_updated_at(value: &str) -> String {
+    let trimmed = value.trim();
+    if NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S").is_ok() {
+        trimmed.to_string()
+    } else {
+        current_local_timestamp()
+    }
 }
 
 #[cfg(test)]
@@ -993,6 +1606,47 @@ rules:
         assert_eq!(parsed.rule_count, 0);
         assert_eq!(parsed.proxy_groups[0].proxies.len(), 2);
         assert!(parsed.rules.is_empty());
+    }
+
+    #[test]
+    fn parses_proxy_selection_map_response() {
+        let body = r#"{
+            "proxies": {
+                "GLOBAL": {"now": "DIRECT", "all": ["DIRECT", "Proxy"]},
+                "MyGroup": {"now": "Proxy A", "all": ["Proxy A", "Proxy B"]},
+                "NoMembers": {"now": "X", "all": []},
+                "NoNow": {"all": ["A", "B"]}
+            }
+        }"#;
+        let map = parse_proxy_selection_map_response(body).expect("should parse controller payload");
+        assert_eq!(map.get("GLOBAL"), Some(&"DIRECT".to_string()));
+        assert_eq!(map.get("MyGroup"), Some(&"Proxy A".to_string()));
+        assert_eq!(map.get("NoMembers"), Some(&"X".to_string()));
+        assert!(!map.contains_key("NoNow"));
+    }
+
+    #[test]
+    fn parses_mode_response() {
+        let mode = parse_mode_response(r#"{"mode":"Rule"}"#).expect("mode should parse");
+        assert_eq!(mode, ProxyMode::Rule);
+
+        let mode = parse_mode_response(r#"{"mode":"global"}"#).expect("mode should parse");
+        assert_eq!(mode, ProxyMode::Global);
+
+        let error = parse_mode_response(r#"{"mode":"invalid"}"#).expect_err("invalid mode");
+        assert!(error.to_string().contains("invalid mode"));
+    }
+
+    #[test]
+    fn parses_delay_response() {
+        let delay = parse_delay_response(r#"{"delay":123}"#).expect("delay should parse");
+        assert_eq!(delay, Some(123));
+
+        let delay = parse_delay_response(r#"{"delay":-1}"#).expect("timeout style should parse");
+        assert_eq!(delay, None);
+
+        let error = parse_delay_response(r#"{"delay":"bad"}"#).expect_err("invalid delay");
+        assert!(error.to_string().contains("parse error"));
     }
 
     #[cfg(target_os = "macos")]

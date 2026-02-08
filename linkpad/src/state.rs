@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use linkpad_core::ProxyMode;
 
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -13,6 +14,8 @@ pub struct AppState {
     pub rules: Vec<String>,
     pub rules_query: String,
     pub rules_filter: RuleFilter,
+    pub rules_visible_count: usize,
+    pub proxy_mode: ProxyMode,
     pub active_proxy_group: Option<String>,
     pub proxy_group_selected: HashMap<String, usize>,
     pub system_proxy_enabled: bool,
@@ -21,7 +24,6 @@ pub struct AppState {
     pub clash_mixed_port: u16,
     pub clash_port_input: String,
     pub clash_core_version: String,
-    pub clash_core_path: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +105,8 @@ impl Default for AppState {
             rules: Vec::new(),
             rules_query: String::new(),
             rules_filter: RuleFilter::All,
+            rules_visible_count: 50,
+            proxy_mode: ProxyMode::Rule,
             active_proxy_group: None,
             proxy_group_selected: HashMap::new(),
             system_proxy_enabled: false,
@@ -111,7 +115,6 @@ impl Default for AppState {
             clash_mixed_port: 7890,
             clash_port_input: "7890".to_string(),
             clash_core_version: "Unknown".to_string(),
-            clash_core_path: "-".to_string(),
         }
     }
 }

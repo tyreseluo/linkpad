@@ -1,5 +1,12 @@
 use crate::{CoreError, CoreResult};
+use flate2::read::GzDecoder;
+use reqwest::blocking::Client;
+use reqwest::header::{ACCEPT, USER_AGENT};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
+use std::io::{Cursor, Read, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -9,6 +16,9 @@ use std::time::Duration;
 const DEFAULT_KERNEL_BINARY: &str = "mihomo";
 const RUNTIME_CONFIG_FILE: &str = "runtime.yaml";
 const RUNTIME_LOG_FILE: &str = "mihomo.log";
+const MIHOMO_RELEASE_API: &str = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest";
+const MIHOMO_RELEASE_LATEST_PAGE: &str = "https://github.com/MetaCubeX/mihomo/releases/latest";
+const LINKPAD_HTTP_USER_AGENT: &str = "linkpad-core/0.1";
 
 #[derive(Clone, Debug)]
 pub struct KernelInfo {
@@ -16,6 +26,29 @@ pub struct KernelInfo {
     pub version: Option<String>,
     pub suggested_path: String,
     pub status: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct KernelUpgradeInfo {
+    pub version: String,
+    pub binary_path: String,
+    pub asset_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    #[serde(default)]
+    tag_name: String,
+    #[serde(default)]
+    assets: Vec<GithubReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 #[derive(Debug)]
@@ -134,6 +167,65 @@ impl KernelRuntime {
         }
     }
 
+    pub fn install_latest_kernel(&self) -> CoreResult<KernelUpgradeInfo> {
+        self.ensure_runtime_dir()?;
+        let release = fetch_latest_release()?;
+        let (asset_name, bytes) = if let Some(asset) = select_release_asset(&release.assets) {
+            let bytes = download_release_asset(asset)?;
+            verify_download_digest(asset, &bytes)?;
+            (asset.name.clone(), bytes)
+        } else {
+            let candidates = release_asset_name_candidates(&release.tag_name);
+            download_release_asset_by_candidates(&release.tag_name, &candidates)?
+        };
+        let binary = decompress_gzip(&bytes)?;
+
+        let install_path = self.install_target_path();
+        if let Some(parent) = install_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| CoreError::InvalidConfig(error.to_string()))?;
+        }
+
+        if install_path.exists() && install_path.is_dir() {
+            return Err(CoreError::InvalidConfig(format!(
+                "kernel install target is still a directory: `{}`",
+                install_path.display()
+            )));
+        }
+
+        let temp_path = install_path.with_extension("tmp");
+        {
+            let mut temp_file = File::create(&temp_path)
+                .map_err(|error| CoreError::InvalidConfig(error.to_string()))?;
+            temp_file
+                .write_all(&binary)
+                .map_err(|error| CoreError::InvalidConfig(error.to_string()))?;
+        }
+        set_executable_permissions(&temp_path)?;
+
+        if install_path.exists() {
+            fs::remove_file(&install_path).map_err(|error| {
+                CoreError::InvalidConfig(format!(
+                    "failed to replace existing kernel binary `{}`: {error}",
+                    install_path.display()
+                ))
+            })?;
+        }
+
+        fs::rename(&temp_path, &install_path).map_err(|error| {
+            CoreError::InvalidConfig(format!(
+                "failed to install kernel binary at `{}`: {error}",
+                install_path.display()
+            ))
+        })?;
+
+        Ok(KernelUpgradeInfo {
+            version: release.tag_name,
+            binary_path: install_path.display().to_string(),
+            asset_name,
+        })
+    }
+
     fn ensure_runtime_dir(&self) -> CoreResult<()> {
         fs::create_dir_all(&self.runtime_dir)
             .map_err(|error| CoreError::InvalidConfig(error.to_string()))
@@ -167,13 +259,6 @@ impl KernelRuntime {
             checked_paths.push(path);
         }
 
-        if let Some(found_in_path) = find_in_path(&self.kernel_binary) {
-            if is_executable_file(&found_in_path) {
-                return Ok(found_in_path);
-            }
-            non_executable_paths.push(found_in_path);
-        }
-
         let mut candidate_paths = self.known_kernel_candidates();
         candidate_paths.insert(0, PathBuf::from(&self.kernel_binary));
 
@@ -182,6 +267,14 @@ impl KernelRuntime {
                 return Ok(resolved);
             }
             checked_paths.push(path);
+        }
+
+        if let Some(found_in_path) = find_in_path(&self.kernel_binary) {
+            if is_executable_file(&found_in_path) {
+                return Ok(found_in_path);
+            }
+            non_executable_paths.push(found_in_path.clone());
+            checked_paths.push(found_in_path);
         }
 
         let hint_path = self.default_install_path();
@@ -248,6 +341,354 @@ impl KernelRuntime {
             return config_dir;
         }
         self.runtime_dir.join("bin").join(platform_kernel_binary_name())
+    }
+
+    fn install_target_path(&self) -> PathBuf {
+        let preferred = self.default_install_path();
+        if preferred.is_dir() {
+            return preferred.join(platform_kernel_binary_name());
+        }
+        preferred
+    }
+}
+
+fn fetch_latest_release() -> CoreResult<GithubRelease> {
+    match fetch_latest_release_from_api() {
+        Ok(release) => Ok(release),
+        Err(api_error) => {
+            let fallback_tag = fetch_latest_release_tag_from_web().map_err(|web_error| {
+                CoreError::Network(format!(
+                    "{api_error}; fallback(web latest) failed: {web_error}"
+                ))
+            })?;
+            Ok(GithubRelease {
+                tag_name: fallback_tag,
+                assets: Vec::new(),
+            })
+        }
+    }
+}
+
+fn fetch_latest_release_from_api() -> CoreResult<GithubRelease> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+
+    let mut request = client
+        .get(MIHOMO_RELEASE_API)
+        .header(USER_AGENT, LINKPAD_HTTP_USER_AGENT)
+        .header(ACCEPT, "application/vnd.github+json");
+    if let Ok(token) = std::env::var("LINKPAD_GITHUB_TOKEN") {
+        let token = token.trim();
+        if !token.is_empty() {
+            request = request.bearer_auth(token);
+        }
+    }
+    let response = request
+        .send()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+    if !status.is_success() {
+        return Err(CoreError::Network(format!(
+            "failed to fetch latest mihomo release: {status} {body}"
+        )));
+    }
+
+    let mut release: GithubRelease =
+        serde_json::from_str(&body).map_err(|error| CoreError::Parse(error.to_string()))?;
+    release.tag_name = normalize_version_tag(&release.tag_name);
+    if release.tag_name.is_empty() {
+        return Err(CoreError::Parse(
+            "latest release has an empty tag".to_string(),
+        ));
+    }
+    Ok(release)
+}
+
+fn fetch_latest_release_tag_from_web() -> CoreResult<String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+
+    let response = client
+        .get(MIHOMO_RELEASE_LATEST_PAGE)
+        .header(USER_AGENT, LINKPAD_HTTP_USER_AGENT)
+        .send()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response
+            .text()
+            .unwrap_or_else(|_| "unable to read response body".to_string());
+        return Err(CoreError::Network(format!(
+            "failed to fetch latest release page: {status} {body}"
+        )));
+    }
+
+    let path = response.url().path().to_string();
+    let marker = "/releases/tag/";
+    let tag = path
+        .split(marker)
+        .nth(1)
+        .map(|value| value.trim_matches('/').to_string())
+        .unwrap_or_default();
+    let tag = normalize_version_tag(&tag);
+    if tag.is_empty() {
+        return Err(CoreError::Parse(
+            "failed to parse latest release tag from github page".to_string(),
+        ));
+    }
+    Ok(tag)
+}
+
+fn select_release_asset(assets: &[GithubReleaseAsset]) -> Option<&GithubReleaseAsset> {
+    let os = release_os_tag();
+    let arch = release_arch_tag();
+    let required_prefix = format!("mihomo-{os}-{arch}-");
+
+    let mut matches = assets
+        .iter()
+        .filter(|asset| {
+            asset.name.starts_with(&required_prefix) && asset.name.to_ascii_lowercase().ends_with(".gz")
+        })
+        .collect::<Vec<_>>();
+
+    matches.sort_by_key(|asset| score_release_asset(&asset.name));
+    matches.into_iter().next()
+}
+
+fn release_asset_name_candidates(tag: &str) -> Vec<String> {
+    let os = release_os_tag();
+    let arch = release_arch_tag();
+    let normalized_tag = normalize_version_tag(tag);
+    let mut names = BTreeSet::new();
+
+    names.insert(format!("mihomo-{os}-{arch}-{normalized_tag}.gz"));
+    names.insert(format!("mihomo-{os}-{arch}-go124-{normalized_tag}.gz"));
+    names.insert(format!("mihomo-{os}-{arch}-go122-{normalized_tag}.gz"));
+    names.insert(format!("mihomo-{os}-{arch}-go120-{normalized_tag}.gz"));
+    names.insert(format!("mihomo-{os}-{arch}-v1-{normalized_tag}.gz"));
+    names.insert(format!("mihomo-{os}-{arch}-v2-{normalized_tag}.gz"));
+    names.insert(format!("mihomo-{os}-{arch}-v1-go124-{normalized_tag}.gz"));
+    names.insert(format!("mihomo-{os}-{arch}-v1-go122-{normalized_tag}.gz"));
+    names.insert(format!("mihomo-{os}-{arch}-v1-go120-{normalized_tag}.gz"));
+    names.insert(format!("mihomo-{os}-{arch}-v2-go124-{normalized_tag}.gz"));
+    names.insert(format!("mihomo-{os}-{arch}-v2-go122-{normalized_tag}.gz"));
+    names.insert(format!("mihomo-{os}-{arch}-v2-go120-{normalized_tag}.gz"));
+    if arch == "amd64" {
+        names.insert(format!("mihomo-{os}-{arch}-compatible-{normalized_tag}.gz"));
+    }
+
+    names.into_iter().collect()
+}
+
+fn download_release_asset_by_candidates(
+    tag: &str,
+    candidates: &[String],
+) -> CoreResult<(String, Vec<u8>)> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+
+    let mut attempts = Vec::new();
+    for asset_name in candidates {
+        let urls = [
+            format!(
+                "https://github.com/MetaCubeX/mihomo/releases/download/{tag}/{asset_name}"
+            ),
+            format!("https://github.com/MetaCubeX/mihomo/releases/latest/download/{asset_name}"),
+        ];
+        for url in &urls {
+            match download_asset_from_url(&client, url) {
+                Ok(Some(bytes)) => return Ok((asset_name.clone(), bytes)),
+                Ok(None) => attempts.push(format!("{asset_name}@404")),
+                Err(error) => attempts.push(format!("{asset_name}@{error}")),
+            }
+        }
+    }
+
+    Err(CoreError::Network(format!(
+        "failed to download compatible kernel asset for tag `{tag}`. attempts: {}",
+        attempts.join(", ")
+    )))
+}
+
+fn score_release_asset(name: &str) -> (u8, u8, u8, usize) {
+    let lower = name.to_ascii_lowercase();
+    let has_alpha = lower.contains("alpha");
+    let has_compatible = lower.contains("compatible");
+    let has_go = lower.contains("-go");
+    (
+        has_alpha as u8,
+        has_compatible as u8,
+        has_go as u8,
+        name.len(),
+    )
+}
+
+fn download_release_asset(asset: &GithubReleaseAsset) -> CoreResult<Vec<u8>> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+
+    match download_asset_from_url(&client, &asset.browser_download_url)? {
+        Some(bytes) => Ok(bytes),
+        None => Err(CoreError::Network(format!(
+            "failed to download kernel asset `{}`: 404 Not Found",
+            asset.name
+        ))),
+    }
+}
+
+fn download_asset_from_url(client: &Client, url: &str) -> CoreResult<Option<Vec<u8>>> {
+    let response = client
+        .get(url)
+        .header(USER_AGENT, LINKPAD_HTTP_USER_AGENT)
+        .send()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        let body = response
+            .text()
+            .unwrap_or_else(|_| "unable to read response body".to_string());
+        return Err(CoreError::Network(format!(
+            "download failed: {status} {body}"
+        )));
+    }
+
+    response
+        .bytes()
+        .map(|bytes| Some(bytes.to_vec()))
+        .map_err(|error| CoreError::Network(error.to_string()))
+}
+
+fn verify_download_digest(asset: &GithubReleaseAsset, bytes: &[u8]) -> CoreResult<()> {
+    let Some(raw_digest) = asset.digest.as_ref() else {
+        return Ok(());
+    };
+
+    let expected = raw_digest
+        .strip_prefix("sha256:")
+        .unwrap_or(raw_digest.as_str())
+        .trim()
+        .to_ascii_lowercase();
+    if expected.is_empty() {
+        return Ok(());
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let actual = format!("{:x}", hasher.finalize());
+    if actual != expected {
+        return Err(CoreError::InvalidConfig(format!(
+            "downloaded kernel digest mismatch for `{}`",
+            asset.name
+        )));
+    }
+    Ok(())
+}
+
+fn decompress_gzip(bytes: &[u8]) -> CoreResult<Vec<u8>> {
+    let mut decoder = GzDecoder::new(Cursor::new(bytes));
+    let mut output = Vec::new();
+    decoder
+        .read_to_end(&mut output)
+        .map_err(|error| CoreError::InvalidConfig(error.to_string()))?;
+    if output.is_empty() {
+        return Err(CoreError::InvalidConfig(
+            "downloaded kernel archive is empty".to_string(),
+        ));
+    }
+    Ok(output)
+}
+
+#[cfg(unix)]
+fn set_executable_permissions(path: &Path) -> CoreResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path)
+        .map_err(|error| CoreError::InvalidConfig(error.to_string()))?
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms).map_err(|error| CoreError::InvalidConfig(error.to_string()))
+}
+
+#[cfg(not(unix))]
+fn set_executable_permissions(_path: &Path) -> CoreResult<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn release_os_tag() -> &'static str {
+    "darwin"
+}
+
+#[cfg(target_os = "linux")]
+fn release_os_tag() -> &'static str {
+    "linux"
+}
+
+#[cfg(target_os = "windows")]
+fn release_os_tag() -> &'static str {
+    "windows"
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "linux"), not(target_os = "windows")))]
+fn release_os_tag() -> &'static str {
+    std::env::consts::OS
+}
+
+#[cfg(target_arch = "aarch64")]
+fn release_arch_tag() -> &'static str {
+    "arm64"
+}
+
+#[cfg(target_arch = "x86_64")]
+fn release_arch_tag() -> &'static str {
+    "amd64"
+}
+
+#[cfg(target_arch = "x86")]
+fn release_arch_tag() -> &'static str {
+    "386"
+}
+
+#[cfg(target_arch = "arm")]
+fn release_arch_tag() -> &'static str {
+    "armv7"
+}
+
+#[cfg(all(
+    not(target_arch = "aarch64"),
+    not(target_arch = "x86_64"),
+    not(target_arch = "x86"),
+    not(target_arch = "arm")
+))]
+fn release_arch_tag() -> &'static str {
+    std::env::consts::ARCH
+}
+
+fn normalize_version_tag(tag: &str) -> String {
+    let trimmed = tag.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.starts_with('v') {
+        trimmed.to_string()
+    } else {
+        format!("v{trimmed}")
     }
 }
 

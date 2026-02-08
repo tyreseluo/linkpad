@@ -79,6 +79,8 @@ live_design! {
                 }
             }
 
+            group_test_btn = <MpButtonSmall> { text: "Test" }
+            group_locate_btn = <MpButtonSmall> { text: "Locate" }
             group_open_btn = <MpButtonSmall> { text: "Open" }
         }
 
@@ -284,7 +286,7 @@ live_design! {
                         <MpCardContent> {
                             width: Fill,
                             flow: Down,
-                            spacing: (SPACE_2),
+                            spacing: (SPACE_1),
 
                             profile_url_label = <Label> {
                                 text: "Profile URL"
@@ -315,6 +317,7 @@ live_design! {
                     }
 
                     current_profile_card = <MpCard> {
+                        visible: false,
                         width: Fill,
                         <MpCardHeader> {
                             current_profile_title = <MpCardTitle> { text: "Current Profile" }
@@ -322,7 +325,7 @@ live_design! {
                         <MpCardContent> {
                             width: Fill,
                             flow: Down,
-                            spacing: (SPACE_2),
+                            spacing: (SPACE_1),
 
                             current_profile_name = <Label> { text: "Name: -" draw_text: {text_style: <APP_FONT_BODY>{}} }
                             current_profile_source = <Label> { text: "Source: -" draw_text: {text_style: <APP_FONT_BODY>{}} }
@@ -348,7 +351,7 @@ live_design! {
                                 width: Fill,
                                 height: Fit,
                                 flow: Right,
-                                align: {y: 0.5},
+                                align: {y: 1.0},
                                 spacing: (SPACE_2),
                                 padding: {left: (SPACE_2), right: (SPACE_2), top: (SPACE_2), bottom: (SPACE_2)},
                                 show_bg: true,
@@ -360,19 +363,29 @@ live_design! {
                                     flow: Down,
                                     spacing: (SPACE_1),
                                     profile_row_1_name = <Label> { text: "Profile Name" draw_text: {text_style: <APP_FONT_BODY>{}} }
-                                    profile_row_1_meta = <Label> { text: "source / updated" draw_text: {text_style: <APP_FONT_CAPTION>{}} }
+                                    profile_row_1_meta = <Label> {
+                                        width: Fill
+                                        text: "source / updated"
+                                        draw_text: {text_style: <APP_FONT_CAPTION>{}, wrap: Word}
+                                    }
                                     profile_row_1_status = <Label> { text: "Active" draw_text: {text_style: <APP_FONT_CAPTION>{}} }
                                 }
-                                profile_row_1_activate_btn = <MpButtonSmall> { text: "Activate" }
-                                profile_row_1_refresh_btn = <MpButtonSmall> { text: "Refresh" }
-                                profile_row_1_delete_btn = <MpButtonSmall> { text: "Delete" }
+                                <View> {
+                                    width: Fit,
+                                    height: Fit,
+                                    flow: Right,
+                                    spacing: (SPACE_1),
+                                    profile_row_1_activate_btn = <MpButtonSmall> { text: "Activate" }
+                                    profile_row_1_refresh_btn = <MpButtonSmall> { text: "Refresh" }
+                                    profile_row_1_delete_btn = <MpButtonSmall> { text: "Delete" }
+                                }
                             }
 
                             profile_row_2 = <View> {
                                 width: Fill,
                                 height: Fit,
                                 flow: Right,
-                                align: {y: 0.5},
+                                align: {y: 1.0},
                                 spacing: (SPACE_2),
                                 padding: {left: (SPACE_2), right: (SPACE_2), top: (SPACE_2), bottom: (SPACE_2)},
                                 show_bg: true,
@@ -384,19 +397,29 @@ live_design! {
                                     flow: Down,
                                     spacing: (SPACE_1),
                                     profile_row_2_name = <Label> { text: "Profile Name" draw_text: {text_style: <APP_FONT_BODY>{}} }
-                                    profile_row_2_meta = <Label> { text: "source / updated" draw_text: {text_style: <APP_FONT_CAPTION>{}} }
+                                    profile_row_2_meta = <Label> {
+                                        width: Fill
+                                        text: "source / updated"
+                                        draw_text: {text_style: <APP_FONT_CAPTION>{}, wrap: Word}
+                                    }
                                     profile_row_2_status = <Label> { text: "Inactive" draw_text: {text_style: <APP_FONT_CAPTION>{}} }
                                 }
-                                profile_row_2_activate_btn = <MpButtonSmall> { text: "Activate" }
-                                profile_row_2_refresh_btn = <MpButtonSmall> { text: "Refresh" }
-                                profile_row_2_delete_btn = <MpButtonSmall> { text: "Delete" }
+                                <View> {
+                                    width: Fit,
+                                    height: Fit,
+                                    flow: Right,
+                                    spacing: (SPACE_1),
+                                    profile_row_2_activate_btn = <MpButtonSmall> { text: "Activate" }
+                                    profile_row_2_refresh_btn = <MpButtonSmall> { text: "Refresh" }
+                                    profile_row_2_delete_btn = <MpButtonSmall> { text: "Delete" }
+                                }
                             }
 
                             profile_row_3 = <View> {
                                 width: Fill,
                                 height: Fit,
                                 flow: Right,
-                                align: {y: 0.5},
+                                align: {y: 1.0},
                                 spacing: (SPACE_2),
                                 padding: {left: (SPACE_2), right: (SPACE_2), top: (SPACE_2), bottom: (SPACE_2)},
                                 show_bg: true,
@@ -408,12 +431,22 @@ live_design! {
                                     flow: Down,
                                     spacing: (SPACE_1),
                                     profile_row_3_name = <Label> { text: "Profile Name" draw_text: {text_style: <APP_FONT_BODY>{}} }
-                                    profile_row_3_meta = <Label> { text: "source / updated" draw_text: {text_style: <APP_FONT_CAPTION>{}} }
+                                    profile_row_3_meta = <Label> {
+                                        width: Fill
+                                        text: "source / updated"
+                                        draw_text: {text_style: <APP_FONT_CAPTION>{}, wrap: Word}
+                                    }
                                     profile_row_3_status = <Label> { text: "Inactive" draw_text: {text_style: <APP_FONT_CAPTION>{}} }
                                 }
-                                profile_row_3_activate_btn = <MpButtonSmall> { text: "Activate" }
-                                profile_row_3_refresh_btn = <MpButtonSmall> { text: "Refresh" }
-                                profile_row_3_delete_btn = <MpButtonSmall> { text: "Delete" }
+                                <View> {
+                                    width: Fit,
+                                    height: Fit,
+                                    flow: Right,
+                                    spacing: (SPACE_1),
+                                    profile_row_3_activate_btn = <MpButtonSmall> { text: "Activate" }
+                                    profile_row_3_refresh_btn = <MpButtonSmall> { text: "Refresh" }
+                                    profile_row_3_delete_btn = <MpButtonSmall> { text: "Delete" }
+                                }
                             }
                         }
                     }
@@ -428,15 +461,24 @@ live_design! {
                     proxy_groups_card = <MpCard> {
                         width: Fill,
                         <MpCardHeader> {
-                            proxy_groups_title = <MpCardTitle> { text: "Proxy Groups" }
-                            proxy_groups_desc = <MpCardDescription> { text: "Groups extracted from the active profile." }
+                            <View> {
+                                width: Fill,
+                                height: Fit,
+                                flow: Right,
+                                align: {x: 1.0, y: 0.5},
+                                spacing: (SPACE_2),
+
+                                <View> {width: Fill, height: Fit}
+                                proxy_mode_rule_btn = <MpButtonSmall> { text: "Rule" }
+                                proxy_mode_global_btn = <MpButtonSmall> { text: "Global" }
+                                proxy_mode_direct_btn = <MpButtonSmall> { text: "Direct" }
+                            }
                         }
                         <MpCardContent> {
                             width: Fill,
                             flow: Down,
-                            spacing: (SPACE_2),
+                            spacing: (SPACE_1),
 
-                            proxy_groups_count = <Label> { text: "Total groups: 0" draw_text: {text_style: <APP_FONT_BODY>{}} }
                             proxy_groups_empty = <Label> { text: "No proxy groups in active profile." draw_text: {text_style: <APP_FONT_CAPTION>{}} }
 
                             proxy_group_row_1 = <ProxyGroupAccordion> {}
@@ -603,7 +645,18 @@ live_design! {
                     clash_settings_card = <MpCard> {
                         width: Fill,
                         <MpCardHeader> {
-                            clash_setting_title = <MpCardTitle> { text: "Clash Setting" }
+                            <View> {
+                                width: Fill,
+                                height: Fit,
+                                flow: Right,
+                                align: {y: 0.5},
+                                spacing: (SPACE_2),
+
+                                clash_setting_title = <MpCardTitle> { text: "Clash Setting" }
+                                <View> {width: Fill, height: Fit}
+                                clash_core_upgrade_btn = <MpButtonPrimary> { text: "UPGRADE" }
+                                clash_core_restart_btn = <MpButtonPrimary> { text: "RESTART" }
+                            }
                         }
                         <MpCardContent> {
                             width: Fill,
@@ -640,20 +693,6 @@ live_design! {
                                 clash_core_version_value = <Label> {
                                     text: "Unknown"
                                     draw_text: {text_style: <APP_FONT_BODY>{}, color: (TEXT_MUTED)}
-                                }
-                            }
-
-                            <View> {
-                                width: Fill,
-                                height: Fit,
-                                flow: Down,
-                                spacing: (SPACE_1),
-
-                                clash_core_path_label = <Label> {text: "Clash Core Path", draw_text: {text_style: <APP_FONT_BODY>{}, color: (TEXT_PRIMARY)}}
-                                clash_core_path_value = <Label> {
-                                    width: Fill
-                                    text: "-"
-                                    draw_text: {text_style: <APP_FONT_CAPTION>{}, wrap: Word, color: (TEXT_MUTED)}
                                 }
                             }
                         }

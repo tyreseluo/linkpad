@@ -5,12 +5,15 @@ use crate::state::{
     AppState, Language, Page, ProfileSummary, ProxyGroupSummary, ProxyNodeSummary, RuleFilter,
     ThemePreference,
 };
-use linkpad_core::Core as LinkpadCore;
+use linkpad_core::{Core as LinkpadCore, KernelUpgradeInfo, ProxyMode};
 use makepad_components::button::MpButtonWidgetRefExt;
 use makepad_components::makepad_widgets::*;
 use makepad_components::switch::MpSwitchWidgetRefExt;
+use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::Once;
 use std::thread;
+use tracing::{error, info, warn};
 
 live_design! {
     use link::widgets::*;
@@ -55,8 +58,8 @@ live_design! {
                         width: Fill,
                         height: Fill,
                         flow: Down,
-                        align: {x: 1.0, y: 1.0},
-                        padding: {left: 0.0, right: (SPACE_4), top: 0.0, bottom: (SPACE_4)},
+                        align: {x: 1.0, y: 0.0},
+                        padding: {left: 0.0, right: (SPACE_4), top: (SPACE_4), bottom: 0.0},
 
                         toast = <View> {
                             width: 360,
@@ -93,17 +96,39 @@ pub struct App {
     #[rust]
     state: AppState,
     #[rust]
+    saved_proxy_group_selections: HashMap<String, String>,
+    #[rust]
     core: LinkpadCore,
     #[rust]
     import_rx: Option<Receiver<ImportTaskResult>>,
     #[rust]
     import_poll_timer: Timer,
     #[rust]
+    latency_rx: Option<Receiver<LatencyTaskEvent>>,
+    #[rust]
+    latency_poll_timer: Timer,
+    #[rust]
+    proxy_latency_ms: HashMap<String, LatencyStatus>,
+    #[rust]
+    latency_testing_group: Option<String>,
+    #[rust]
+    pending_locate: Option<(usize, usize)>,
+    #[rust]
+    locate_retry_count: usize,
+    #[rust]
+    locate_timer: Timer,
+    #[rust]
     notification_queue: Vec<Notification>,
     #[rust]
     active_notification: Option<Notification>,
     #[rust]
     notification_timer: Timer,
+    #[rust]
+    core_task_rx: Option<Receiver<CoreTaskResult>>,
+    #[rust]
+    core_task_timer: Timer,
+    #[rust]
+    core_task_kind: Option<CoreTaskKind>,
 }
 
 #[derive(Clone, Copy)]
@@ -133,6 +158,8 @@ struct ProxyGroupRowIds {
     name: &'static [LiveId],
     meta: &'static [LiveId],
     status: &'static [LiveId],
+    test_btn: &'static [LiveId],
+    locate_btn: &'static [LiveId],
     open_btn: &'static [LiveId],
     details: &'static [LiveId],
     detail_empty: &'static [LiveId],
@@ -149,6 +176,44 @@ struct ProxyItemRowIds {
 }
 
 type ImportTaskResult = Result<(), String>;
+type CoreTaskResult = Result<CoreTaskOutput, String>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LatencyStatus {
+    NotTested,
+    Timeout,
+    Value(u32),
+}
+
+#[derive(Debug)]
+enum LatencyTaskEvent {
+    Progress {
+        group_name: String,
+        proxy_name: String,
+        delay: Option<u32>,
+    },
+    Finished {
+        group_name: String,
+        success_count: usize,
+        total_count: usize,
+    },
+    Failed {
+        group_name: String,
+        error: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CoreTaskKind {
+    Upgrading,
+    Restarting,
+}
+
+#[derive(Debug)]
+enum CoreTaskOutput {
+    Upgraded(KernelUpgradeInfo),
+    Restarted,
+}
 
 #[derive(Clone)]
 struct Notification {
@@ -178,6 +243,7 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        self.try_lazy_load_rules_on_scroll(cx, event);
     }
 }
 
@@ -189,6 +255,8 @@ impl App {
                 name: ids!(dashboard.proxy_group_row_1.header.group_name),
                 meta: ids!(dashboard.proxy_group_row_1.header.group_meta),
                 status: ids!(dashboard.proxy_group_row_1.header.group_status),
+                test_btn: ids!(dashboard.proxy_group_row_1.header.group_test_btn),
+                locate_btn: ids!(dashboard.proxy_group_row_1.header.group_locate_btn),
                 open_btn: ids!(dashboard.proxy_group_row_1.header.group_open_btn),
                 details: ids!(dashboard.proxy_group_row_1.details),
                 detail_empty: ids!(dashboard.proxy_group_row_1.details.detail_empty),
@@ -199,6 +267,8 @@ impl App {
                 name: ids!(dashboard.proxy_group_row_2.header.group_name),
                 meta: ids!(dashboard.proxy_group_row_2.header.group_meta),
                 status: ids!(dashboard.proxy_group_row_2.header.group_status),
+                test_btn: ids!(dashboard.proxy_group_row_2.header.group_test_btn),
+                locate_btn: ids!(dashboard.proxy_group_row_2.header.group_locate_btn),
                 open_btn: ids!(dashboard.proxy_group_row_2.header.group_open_btn),
                 details: ids!(dashboard.proxy_group_row_2.details),
                 detail_empty: ids!(dashboard.proxy_group_row_2.details.detail_empty),
@@ -209,6 +279,8 @@ impl App {
                 name: ids!(dashboard.proxy_group_row_3.header.group_name),
                 meta: ids!(dashboard.proxy_group_row_3.header.group_meta),
                 status: ids!(dashboard.proxy_group_row_3.header.group_status),
+                test_btn: ids!(dashboard.proxy_group_row_3.header.group_test_btn),
+                locate_btn: ids!(dashboard.proxy_group_row_3.header.group_locate_btn),
                 open_btn: ids!(dashboard.proxy_group_row_3.header.group_open_btn),
                 details: ids!(dashboard.proxy_group_row_3.details),
                 detail_empty: ids!(dashboard.proxy_group_row_3.details.detail_empty),
@@ -219,6 +291,8 @@ impl App {
                 name: ids!(dashboard.proxy_group_row_4.header.group_name),
                 meta: ids!(dashboard.proxy_group_row_4.header.group_meta),
                 status: ids!(dashboard.proxy_group_row_4.header.group_status),
+                test_btn: ids!(dashboard.proxy_group_row_4.header.group_test_btn),
+                locate_btn: ids!(dashboard.proxy_group_row_4.header.group_locate_btn),
                 open_btn: ids!(dashboard.proxy_group_row_4.header.group_open_btn),
                 details: ids!(dashboard.proxy_group_row_4.details),
                 detail_empty: ids!(dashboard.proxy_group_row_4.details.detail_empty),
@@ -229,6 +303,8 @@ impl App {
                 name: ids!(dashboard.proxy_group_row_5.header.group_name),
                 meta: ids!(dashboard.proxy_group_row_5.header.group_meta),
                 status: ids!(dashboard.proxy_group_row_5.header.group_status),
+                test_btn: ids!(dashboard.proxy_group_row_5.header.group_test_btn),
+                locate_btn: ids!(dashboard.proxy_group_row_5.header.group_locate_btn),
                 open_btn: ids!(dashboard.proxy_group_row_5.header.group_open_btn),
                 details: ids!(dashboard.proxy_group_row_5.details),
                 detail_empty: ids!(dashboard.proxy_group_row_5.details.detail_empty),
@@ -239,6 +315,8 @@ impl App {
                 name: ids!(dashboard.proxy_group_row_6.header.group_name),
                 meta: ids!(dashboard.proxy_group_row_6.header.group_meta),
                 status: ids!(dashboard.proxy_group_row_6.header.group_status),
+                test_btn: ids!(dashboard.proxy_group_row_6.header.group_test_btn),
+                locate_btn: ids!(dashboard.proxy_group_row_6.header.group_locate_btn),
                 open_btn: ids!(dashboard.proxy_group_row_6.header.group_open_btn),
                 details: ids!(dashboard.proxy_group_row_6.details),
                 detail_empty: ids!(dashboard.proxy_group_row_6.details.detail_empty),
@@ -249,6 +327,8 @@ impl App {
                 name: ids!(dashboard.proxy_group_row_7.header.group_name),
                 meta: ids!(dashboard.proxy_group_row_7.header.group_meta),
                 status: ids!(dashboard.proxy_group_row_7.header.group_status),
+                test_btn: ids!(dashboard.proxy_group_row_7.header.group_test_btn),
+                locate_btn: ids!(dashboard.proxy_group_row_7.header.group_locate_btn),
                 open_btn: ids!(dashboard.proxy_group_row_7.header.group_open_btn),
                 details: ids!(dashboard.proxy_group_row_7.details),
                 detail_empty: ids!(dashboard.proxy_group_row_7.details.detail_empty),
@@ -259,6 +339,8 @@ impl App {
                 name: ids!(dashboard.proxy_group_row_8.header.group_name),
                 meta: ids!(dashboard.proxy_group_row_8.header.group_meta),
                 status: ids!(dashboard.proxy_group_row_8.header.group_status),
+                test_btn: ids!(dashboard.proxy_group_row_8.header.group_test_btn),
+                locate_btn: ids!(dashboard.proxy_group_row_8.header.group_locate_btn),
                 open_btn: ids!(dashboard.proxy_group_row_8.header.group_open_btn),
                 details: ids!(dashboard.proxy_group_row_8.details),
                 detail_empty: ids!(dashboard.proxy_group_row_8.details.detail_empty),
@@ -268,6 +350,23 @@ impl App {
     }
 
     const MAX_PROXY_OPTIONS_PER_GROUP: usize = 128;
+    const RULES_PAGE_SIZE: usize = 50;
+
+    fn init_logging() {
+        static LOGGING_INIT: Once = Once::new();
+        LOGGING_INIT.call_once(|| {
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("linkpad=info,linkpad_core=info,warn"));
+            if let Err(init_error) = tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_target(true)
+                .with_thread_ids(true)
+                .try_init()
+            {
+                eprintln!("failed to initialize tracing subscriber: {init_error}");
+            }
+        });
+    }
 
     fn proxy_item_row_ids(row_index: usize, item_index: usize) -> ProxyItemRowIds {
         let group_id = LiveId::from_str(&format!("proxy_group_row_{}", row_index + 1));
@@ -454,20 +553,28 @@ impl App {
             .label(ids!(dashboard.clash_core_version_label))
             .set_text(cx, strings.clash_core_version_label);
         self.ui
-            .label(ids!(dashboard.clash_core_path_label))
-            .set_text(cx, strings.clash_core_path_label);
-        self.ui
             .mp_button(ids!(dashboard.clash_port_save_btn))
             .set_text(strings.clash_port_save_button);
+        self.ui
+            .mp_button(ids!(dashboard.clash_core_upgrade_btn))
+            .set_text(if self.core_task_kind == Some(CoreTaskKind::Upgrading) {
+                strings.clash_core_upgrading_button
+            } else {
+                strings.clash_core_upgrade_button
+            });
+        self.ui
+            .mp_button(ids!(dashboard.clash_core_restart_btn))
+            .set_text(if self.core_task_kind == Some(CoreTaskKind::Restarting) {
+                strings.clash_core_restarting_button
+            } else {
+                strings.clash_core_restart_button
+            });
         self.ui
             .text_input(ids!(dashboard.clash_port_input))
             .set_text(cx, &self.state.clash_port_input);
         self.ui
             .label(ids!(dashboard.clash_core_version_value))
             .set_text(cx, &self.state.clash_core_version);
-        self.ui
-            .label(ids!(dashboard.clash_core_path_value))
-            .set_text(cx, &self.state.clash_core_path);
 
         let language_dropdown = self.ui.drop_down(ids!(dashboard.language_dropdown));
         language_dropdown.set_labels(cx, i18n::language_options(self.state.language));
@@ -584,72 +691,8 @@ impl App {
             );
 
         self.ui
-            .label(ids!(dashboard.current_profile_title))
-            .set_text(cx, strings.profiles_current_title);
-        if let Some(profile) = self.state.active_profile() {
-            self.ui
-                .label(ids!(dashboard.current_profile_name))
-                .set_text(
-                    cx,
-                    &format!("{}: {}", strings.profiles_current_name, profile.name),
-                );
-            self.ui
-                .label(ids!(dashboard.current_profile_source))
-                .set_text(
-                    cx,
-                    &format!(
-                        "{}: {}",
-                        strings.profiles_current_source,
-                        Self::truncate_text(&profile.source, 84)
-                    ),
-                );
-            self.ui
-                .label(ids!(dashboard.current_profile_updated))
-                .set_text(
-                    cx,
-                    &format!(
-                        "{}: {}",
-                        strings.profiles_current_updated, profile.updated_at
-                    ),
-                );
-            self.ui
-                .label(ids!(dashboard.current_profile_stats))
-                .set_text(
-                    cx,
-                    &format!(
-                        "{}: nodes {} | groups {} | rules {}",
-                        strings.profiles_current_stats,
-                        profile.node_count,
-                        profile.group_count,
-                        profile.rule_count
-                    ),
-                );
-            self.ui
-                .label(ids!(dashboard.current_profile_empty))
-                .set_text(cx, "");
-        } else {
-            self.ui
-                .label(ids!(dashboard.current_profile_name))
-                .set_text(cx, &format!("{}: -", strings.profiles_current_name));
-            self.ui
-                .label(ids!(dashboard.current_profile_source))
-                .set_text(cx, &format!("{}: -", strings.profiles_current_source));
-            self.ui
-                .label(ids!(dashboard.current_profile_updated))
-                .set_text(cx, &format!("{}: -", strings.profiles_current_updated));
-            self.ui
-                .label(ids!(dashboard.current_profile_stats))
-                .set_text(
-                    cx,
-                    &format!(
-                        "{}: nodes 0 | groups 0 | rules 0",
-                        strings.profiles_current_stats
-                    ),
-                );
-            self.ui
-                .label(ids!(dashboard.current_profile_empty))
-                .set_text(cx, strings.profiles_current_empty);
-        }
+            .widget(ids!(dashboard.current_profile_card))
+            .set_visible(cx, false);
 
         self.ui
             .label(ids!(dashboard.profiles_list_title))
@@ -669,6 +712,7 @@ impl App {
             &mut self.ui,
             strings,
             self.state.profiles.get(0),
+            palette,
             ids!(dashboard.profile_row_1),
             ids!(dashboard.profile_row_1_name),
             ids!(dashboard.profile_row_1_meta),
@@ -682,6 +726,7 @@ impl App {
             &mut self.ui,
             strings,
             self.state.profiles.get(1),
+            palette,
             ids!(dashboard.profile_row_2),
             ids!(dashboard.profile_row_2_name),
             ids!(dashboard.profile_row_2_meta),
@@ -695,6 +740,7 @@ impl App {
             &mut self.ui,
             strings,
             self.state.profiles.get(2),
+            palette,
             ids!(dashboard.profile_row_3),
             ids!(dashboard.profile_row_3_name),
             ids!(dashboard.profile_row_3_meta),
@@ -707,21 +753,20 @@ impl App {
 
     fn apply_proxy_groups_state(&mut self, cx: &mut Cx, strings: &i18n::Strings) {
         self.ui
-            .label(ids!(dashboard.proxy_groups_title))
-            .set_text(cx, strings.proxy_groups_title);
+            .mp_button(ids!(dashboard.proxy_mode_rule_btn))
+            .set_text(strings.proxy_mode_rule);
         self.ui
-            .label(ids!(dashboard.proxy_groups_desc))
-            .set_text(cx, strings.proxy_groups_desc);
-        self.ui.label(ids!(dashboard.proxy_groups_count)).set_text(
-            cx,
-            &format!(
-                "{}: {}",
-                strings.proxy_groups_count_prefix,
-                self.state.proxy_groups.len()
-            ),
-        );
+            .mp_button(ids!(dashboard.proxy_mode_global_btn))
+            .set_text(strings.proxy_mode_global);
+        self.ui
+            .mp_button(ids!(dashboard.proxy_mode_direct_btn))
+            .set_text(strings.proxy_mode_direct);
+        self.apply_proxy_mode_buttons(cx);
 
         if self.state.proxy_groups.is_empty() {
+            self.ui
+                .label(ids!(dashboard.proxy_groups_empty))
+                .set_visible(cx, true);
             self.ui
                 .label(ids!(dashboard.proxy_groups_empty))
                 .set_text(cx, strings.proxy_groups_empty);
@@ -730,6 +775,9 @@ impl App {
             }
             return;
         }
+        self.ui
+            .label(ids!(dashboard.proxy_groups_empty))
+            .set_visible(cx, false);
         self.ui
             .label(ids!(dashboard.proxy_groups_empty))
             .set_text(cx, "");
@@ -797,12 +845,19 @@ impl App {
         );
 
         let filtered_rules = self.filtered_rules();
+        let total_count = filtered_rules.len();
+        self.ensure_rules_visible_count(total_count);
+        let show_count = if self.should_paginate_rules() {
+            self.state.rules_visible_count.min(total_count)
+        } else {
+            total_count
+        };
         self.ui.label(ids!(dashboard.rules_count)).set_text(
             cx,
-            &format!("{}: {}", strings.rules_count_prefix, filtered_rules.len()),
+            &format!("{}: {}", strings.rules_count_prefix, total_count),
         );
 
-        if filtered_rules.is_empty() {
+        if total_count == 0 {
             self.ui
                 .label(ids!(dashboard.rules_empty))
                 .set_text(cx, strings.rules_empty);
@@ -813,6 +868,7 @@ impl App {
         self.ui.label(ids!(dashboard.rules_empty)).set_text(cx, "");
         let rules_text = filtered_rules
             .iter()
+            .take(show_count)
             .enumerate()
             .map(|(index, rule)| format!("{}. {}", index + 1, rule))
             .collect::<Vec<_>>()
@@ -828,6 +884,7 @@ impl App {
         ui: &mut WidgetRef,
         strings: &i18n::Strings,
         profile: Option<&ProfileSummary>,
+        palette: ThemePalette,
         row_id: &[LiveId; 2],
         name_id: &[LiveId; 2],
         meta_id: &[LiveId; 2],
@@ -842,11 +899,22 @@ impl App {
         };
 
         ui.view(row_id).set_visible(cx, true);
+        let row_bg = if profile.active {
+            palette.menu_active_bg
+        } else {
+            palette.panel_bg
+        };
+        ui.view(row_id).apply_over(
+            cx,
+            live! {
+                draw_bg: { color: (row_bg) }
+            },
+        );
         ui.label(name_id).set_text(cx, &profile.name);
         ui.label(meta_id).set_text(
             cx,
             &format!(
-                "{} | {}: {}",
+                "{}\n{}: {}",
                 Self::truncate_text(&profile.source, 54),
                 strings.profiles_current_updated,
                 profile.updated_at
@@ -915,6 +983,19 @@ impl App {
         );
 
         let is_open = self.state.active_proxy_group.as_deref() == Some(group.name.as_str());
+        let is_latency_testing = self
+            .latency_testing_group
+            .as_deref()
+            .map(|name| name == group.name.as_str())
+            .unwrap_or(false);
+        self.ui.mp_button(row_ids.test_btn).set_text(if is_latency_testing {
+            strings.proxy_groups_testing
+        } else {
+            strings.proxy_groups_test_latency
+        });
+        self.ui
+            .mp_button(row_ids.locate_btn)
+            .set_text(strings.proxy_groups_locate);
         self.ui.mp_button(row_ids.open_btn).set_text(if is_open {
             strings.proxy_groups_opened
         } else {
@@ -959,17 +1040,46 @@ impl App {
                 continue;
             };
             self.ui.view(&item.row).set_visible(cx, true);
+            let item_bg = if item_index == selected_index {
+                palette.menu_active_bg
+            } else {
+                palette.panel_bg
+            };
+            self.ui.view(&item.row).apply_over(
+                cx,
+                live! {
+                    draw_bg: { color: (item_bg) }
+                },
+            );
             self.ui.label(&item.name).set_text(cx, &proxy_name);
             self.ui
                 .label(&item.meta)
                 .set_text(cx, &self.proxy_protocol_label(strings, &proxy_name));
-            self.ui.label(&item.speed).set_text(
-                cx,
-                &format!(
-                    "{} {}",
-                    Self::mock_latency_ms(&proxy_name),
-                    strings.proxy_groups_proxy_latency_suffix
+            let latency_state = self
+                .proxy_latency_ms
+                .get(&proxy_name)
+                .copied()
+                .unwrap_or(LatencyStatus::NotTested);
+            let (latency_text, latency_color) = match latency_state {
+                LatencyStatus::Value(value) => (
+                    format!("{} {}", value, strings.proxy_groups_proxy_latency_suffix),
+                    palette.text_muted,
                 ),
+                LatencyStatus::Timeout => (
+                    strings.proxy_groups_latency_timeout.to_string(),
+                    palette.status_error,
+                ),
+                LatencyStatus::NotTested => (
+                    strings.proxy_groups_latency_not_tested.to_string(),
+                    palette.text_muted,
+                ),
+            };
+            self.ui.label(&item.speed).set_text(cx, &latency_text);
+            self.ui.label(&item.speed).apply_over(
+                cx,
+                live! {
+                    draw_text: { color: (latency_color) }
+                },
             );
             self.ui
                 .mp_button(&item.select_btn)
@@ -1004,6 +1114,54 @@ impl App {
             .filter(|rule| query.is_empty() || rule.to_ascii_lowercase().contains(&query))
             .cloned()
             .collect()
+    }
+
+    fn should_paginate_rules(&self) -> bool {
+        self.state.rules_filter == RuleFilter::All
+            && self.state.rules_query.trim().is_empty()
+    }
+
+    fn reset_rules_pagination(&mut self) {
+        self.state.rules_visible_count = Self::RULES_PAGE_SIZE;
+    }
+
+    fn ensure_rules_visible_count(&mut self, filtered_count: usize) {
+        if !self.should_paginate_rules() {
+            self.state.rules_visible_count = filtered_count;
+            return;
+        }
+        if self.state.rules_visible_count == 0 {
+            self.state.rules_visible_count = Self::RULES_PAGE_SIZE.min(filtered_count);
+        } else if self.state.rules_visible_count > filtered_count {
+            self.state.rules_visible_count = filtered_count;
+        }
+    }
+
+    fn try_lazy_load_rules_on_scroll(&mut self, cx: &mut Cx, event: &Event) {
+        if self.state.active_page != Page::Rules || !self.should_paginate_rules() {
+            return;
+        }
+
+        let Event::Scroll(_) = event else {
+            return;
+        };
+
+        let area = self.ui.view(ids!(dashboard.content_body)).area();
+        if area.is_empty() {
+            return;
+        }
+        if !matches!(event.hits(cx, area), Hit::FingerScroll(_)) {
+            return;
+        }
+
+        let filtered_count = self.filtered_rules().len();
+        if filtered_count == 0 || self.state.rules_visible_count >= filtered_count {
+            return;
+        }
+
+        self.state.rules_visible_count =
+            (self.state.rules_visible_count + Self::RULES_PAGE_SIZE).min(filtered_count);
+        self.refresh_ui(cx);
     }
 
     fn rule_matches_filter(rule: &str, filter: RuleFilter) -> bool {
@@ -1052,6 +1210,8 @@ impl App {
                 udp: node.udp,
             })
             .collect();
+        self.proxy_latency_ms
+            .retain(|proxy_name, _| self.state.proxy_nodes.iter().any(|node| node.name == *proxy_name));
 
         self.state.proxy_groups = self
             .core
@@ -1066,6 +1226,7 @@ impl App {
             .collect();
 
         self.state.rules = self.core.active_rules();
+        self.reset_rules_pagination();
 
         self.state
             .proxy_group_selected
@@ -1091,6 +1252,28 @@ impl App {
                 .entry(group.name.clone())
                 .or_insert(0);
         }
+        let mut has_controller_selection = false;
+        if let Ok(controller_selected) = self.core.current_proxy_group_selections() {
+            has_controller_selection = !controller_selected.is_empty();
+            for group in &self.state.proxy_groups {
+                let Some(selected_proxy_name) = controller_selected.get(&group.name) else {
+                    continue;
+                };
+                if let Some(index) = group
+                    .proxies
+                    .iter()
+                    .position(|proxy| proxy == selected_proxy_name)
+                {
+                    self.state
+                        .proxy_group_selected
+                        .insert(group.name.clone(), index);
+                }
+            }
+        }
+        if !has_controller_selection {
+            self.apply_saved_proxy_group_selections();
+        }
+        self.snapshot_proxy_group_selections();
 
         let active_exists = self
             .state
@@ -1108,6 +1291,10 @@ impl App {
         }
 
         let config = self.core.config();
+        self.state.proxy_mode = config.mode;
+        if let Ok(mode) = self.core.current_mode() {
+            self.state.proxy_mode = mode;
+        }
         self.state.clash_mixed_port = config.mixed_port;
         self.state.clash_port_input = config.mixed_port.to_string();
 
@@ -1115,11 +1302,50 @@ impl App {
         self.state.clash_core_version = kernel_info
             .version
             .unwrap_or_else(|| "Not Found".to_string());
-        self.state.clash_core_path = match kernel_info.binary_path {
-            Some(path) => path,
-            None => format!("{} (missing)", kernel_info.suggested_path),
-        };
         self.state.system_proxy_enabled = self.core.is_system_proxy_enabled();
+        self.persist_settings();
+    }
+
+    fn apply_saved_proxy_group_selections(&mut self) {
+        for group in &self.state.proxy_groups {
+            let Some(saved_proxy_name) = self.saved_proxy_group_selections.get(&group.name) else {
+                continue;
+            };
+            let Some(index) = group.proxies.iter().position(|name| name == saved_proxy_name) else {
+                continue;
+            };
+            self.state
+                .proxy_group_selected
+                .insert(group.name.clone(), index);
+        }
+    }
+
+    fn snapshot_proxy_group_selections(&mut self) {
+        for group in &self.state.proxy_groups {
+            let Some(selected_index) = self.state.proxy_group_selected.get(&group.name).copied() else {
+                continue;
+            };
+            let Some(selected_proxy_name) = group.proxies.get(selected_index) else {
+                continue;
+            };
+            self.saved_proxy_group_selections
+                .insert(group.name.clone(), selected_proxy_name.clone());
+        }
+    }
+
+    fn apply_saved_proxy_group_selections_to_core(&mut self) {
+        if self.state.proxy_groups.is_empty() {
+            return;
+        }
+        for group in &self.state.proxy_groups {
+            let Some(selected_index) = self.state.proxy_group_selected.get(&group.name).copied() else {
+                continue;
+            };
+            let Some(selected_proxy_name) = group.proxies.get(selected_index) else {
+                continue;
+            };
+            let _ = self.core.select_proxy(&group.name, selected_proxy_name);
+        }
     }
 
     fn select_active_proxy_group(&mut self, cx: &mut Cx, row_index: usize) {
@@ -1140,20 +1366,345 @@ impl App {
     }
 
     fn select_proxy_item_for_group(&mut self, cx: &mut Cx, row_index: usize, item_index: usize) {
-        let Some((group_name, proxy_len)) = self
+        let Some((group_name, proxy_name, proxy_len)) = self
             .state
             .proxy_groups
             .get(row_index)
-            .map(|group| (group.name.clone(), group.proxies.len()))
+            .and_then(|group| {
+                group
+                    .proxies
+                    .get(item_index)
+                    .cloned()
+                    .map(|proxy_name| (group.name.clone(), proxy_name, group.proxies.len()))
+            })
         else {
             return;
         };
         if item_index >= proxy_len {
             return;
         }
-        self.state
+        info!("proxy selection requested: group={group_name}, index={item_index}");
+        match self.core.select_proxy(&group_name, &proxy_name) {
+            Ok(()) => {
+                self.state
+                    .proxy_group_selected
+                    .insert(group_name, item_index);
+                self.snapshot_proxy_group_selections();
+                self.persist_settings();
+                info!("proxy selection applied: proxy={proxy_name}");
+            }
+            Err(error) => {
+                let strings = i18n::strings(self.state.language);
+                error!("proxy selection failed: {error}");
+                self.push_notification(
+                    cx,
+                    NotificationLevel::Error,
+                    format!("{}: {error}", strings.proxy_groups_select_failed_prefix),
+                );
+            }
+        }
+        self.refresh_ui(cx);
+    }
+
+    fn start_latency_test_for_group(&mut self, cx: &mut Cx, row_index: usize) {
+        if self.latency_rx.is_some() {
+            return;
+        }
+
+        let Some(group) = self.state.proxy_groups.get(row_index).cloned() else {
+            return;
+        };
+        if group.proxies.is_empty() {
+            let strings = i18n::strings(self.state.language);
+            self.push_notification(
+                cx,
+                NotificationLevel::Info,
+                strings.proxy_groups_proxy_empty.to_string(),
+            );
+            return;
+        }
+
+        for proxy_name in &group.proxies {
+            self.proxy_latency_ms
+                .insert(proxy_name.clone(), LatencyStatus::NotTested);
+        }
+
+        let core = self.core.clone();
+        let group_name_for_ui = group.name.clone();
+        let group_name_for_task = group.name;
+        let proxies = group.proxies;
+        let (tx, rx) = std::sync::mpsc::channel::<LatencyTaskEvent>();
+        thread::spawn(move || {
+            let mut success_count = 0usize;
+            let mut first_error: Option<String> = None;
+            let total_count = proxies.len();
+
+            for proxy_name in proxies {
+                let delay = match core.probe_proxy_delay(&proxy_name) {
+                    Ok(delay) => {
+                        if delay.is_some() {
+                            success_count += 1;
+                        }
+                        delay
+                    }
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error.to_string());
+                        }
+                        None
+                    }
+                };
+
+                let _ = tx.send(LatencyTaskEvent::Progress {
+                    group_name: group_name_for_task.clone(),
+                    proxy_name,
+                    delay,
+                });
+            }
+
+            if success_count == 0 {
+                if let Some(error) = first_error {
+                    let _ = tx.send(LatencyTaskEvent::Failed {
+                        group_name: group_name_for_task,
+                        error,
+                    });
+                    return;
+                }
+            }
+
+            let _ = tx.send(LatencyTaskEvent::Finished {
+                group_name: group_name_for_task,
+                success_count,
+                total_count,
+            });
+        });
+
+        if !self.latency_poll_timer.is_empty() {
+            cx.stop_timer(self.latency_poll_timer);
+        }
+        self.latency_rx = Some(rx);
+        self.latency_testing_group = Some(group_name_for_ui);
+        self.latency_poll_timer = cx.start_interval(0.1);
+        self.refresh_ui(cx);
+    }
+
+    fn stop_latency_polling(&mut self, cx: &mut Cx) {
+        if !self.latency_poll_timer.is_empty() {
+            cx.stop_timer(self.latency_poll_timer);
+            self.latency_poll_timer = Timer::default();
+        }
+        self.latency_rx = None;
+        self.latency_testing_group = None;
+    }
+
+    fn poll_latency_test(&mut self, cx: &mut Cx) {
+        let mut events = Vec::new();
+        let disconnected = {
+            let Some(latency_rx) = self.latency_rx.as_ref() else {
+                return;
+            };
+
+            loop {
+                match latency_rx.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(TryRecvError::Empty) => break false,
+                    Err(TryRecvError::Disconnected) => break true,
+                }
+            }
+        };
+
+        if events.is_empty() && !disconnected {
+            return;
+        }
+
+        let strings = i18n::strings(self.state.language);
+        let mut should_stop = false;
+
+        for event in events {
+            match event {
+                LatencyTaskEvent::Progress {
+                    group_name,
+                    proxy_name,
+                    delay,
+                } => {
+                    if self
+                        .latency_testing_group
+                        .as_deref()
+                        .map(|active| active == group_name.as_str())
+                        .unwrap_or(false)
+                    {
+                        let status = delay
+                            .map(LatencyStatus::Value)
+                            .unwrap_or(LatencyStatus::Timeout);
+                        self.proxy_latency_ms.insert(proxy_name, status);
+                    }
+                }
+                LatencyTaskEvent::Finished {
+                    group_name,
+                    success_count,
+                    total_count,
+                } => {
+                    should_stop = true;
+                    self.push_notification(
+                        cx,
+                        NotificationLevel::Success,
+                        format!(
+                            "{}: {} ({}/{})",
+                            strings.proxy_groups_latency_test_success_prefix,
+                            group_name,
+                            success_count,
+                            total_count
+                        ),
+                    );
+                }
+                LatencyTaskEvent::Failed { group_name, error } => {
+                    should_stop = true;
+                    self.push_notification(
+                        cx,
+                        NotificationLevel::Error,
+                        format!(
+                            "{}: {} ({error})",
+                            strings.proxy_groups_latency_test_failed_prefix, group_name
+                        ),
+                    );
+                }
+            }
+        }
+
+        if disconnected && !should_stop {
+            should_stop = true;
+            self.push_notification(
+                cx,
+                NotificationLevel::Error,
+                format!(
+                    "{}: latency worker disconnected",
+                    strings.proxy_groups_latency_test_failed_prefix
+                ),
+            );
+        }
+
+        if should_stop {
+            self.stop_latency_polling(cx);
+        }
+
+        self.refresh_ui(cx);
+    }
+
+    fn locate_selected_proxy_for_group(&mut self, cx: &mut Cx, row_index: usize) {
+        let Some(group) = self.state.proxy_groups.get(row_index).cloned() else {
+            return;
+        };
+        let Some(proxy_count) = (!group.proxies.is_empty()).then_some(group.proxies.len()) else {
+            let strings = i18n::strings(self.state.language);
+            self.push_notification(
+                cx,
+                NotificationLevel::Info,
+                strings.proxy_groups_locate_failed.to_string(),
+            );
+            return;
+        };
+
+        let mut selected_index = self
+            .state
             .proxy_group_selected
-            .insert(group_name, item_index);
+            .get(&group.name)
+            .copied()
+            .unwrap_or(0);
+        if selected_index >= proxy_count {
+            selected_index = 0;
+        }
+
+        self.state.active_proxy_group = Some(group.name);
+        self.pending_locate = Some((row_index, selected_index));
+        self.locate_retry_count = 0;
+        if !self.locate_timer.is_empty() {
+            cx.stop_timer(self.locate_timer);
+        }
+        self.locate_timer = cx.start_timeout(0.04);
+        self.refresh_ui(cx);
+    }
+
+    fn perform_pending_locate(&mut self, cx: &mut Cx) {
+        let Some((row_index, item_index)) = self.pending_locate else {
+            return;
+        };
+
+        let item = Self::proxy_item_row_ids(row_index, item_index);
+        let content_area = self.ui.view(ids!(dashboard.content_body)).area();
+        let target_area = self.ui.view(&item.row).area();
+
+        if !content_area.is_empty() && !target_area.is_empty() {
+            let content_rect = content_area.rect(cx);
+            let target_rect = target_area.rect(cx);
+            let target_y = (target_rect.pos.y - content_rect.pos.y - 24.0).max(0.0);
+            self.ui
+                .view(ids!(dashboard.content_body))
+                .set_scroll_pos(cx, dvec2(0.0, target_y));
+            self.pending_locate = None;
+            self.locate_retry_count = 0;
+            if !self.locate_timer.is_empty() {
+                cx.stop_timer(self.locate_timer);
+            }
+            self.locate_timer = Timer::default();
+            self.refresh_ui(cx);
+            return;
+        }
+
+        if self.locate_retry_count < 6 {
+            self.locate_retry_count += 1;
+            if !self.locate_timer.is_empty() {
+                cx.stop_timer(self.locate_timer);
+            }
+            self.locate_timer = cx.start_timeout(0.05);
+            return;
+        }
+
+        let fallback_y = Self::estimate_proxy_item_scroll_y(row_index, item_index);
+        self.ui
+            .view(ids!(dashboard.content_body))
+            .set_scroll_pos(cx, dvec2(0.0, fallback_y));
+        self.pending_locate = None;
+        self.locate_retry_count = 0;
+        if !self.locate_timer.is_empty() {
+            cx.stop_timer(self.locate_timer);
+        }
+        self.locate_timer = Timer::default();
+        self.refresh_ui(cx);
+    }
+
+    fn estimate_proxy_item_scroll_y(row_index: usize, item_index: usize) -> f64 {
+        let card_top_padding = 220.0;
+        let collapsed_group_height = 90.0;
+        let group_header_height = 72.0;
+        let option_row_height = 96.0;
+        let option_row_index = item_index / 2;
+        card_top_padding
+            + (row_index as f64 * collapsed_group_height)
+            + group_header_height
+            + (option_row_index as f64 * option_row_height)
+    }
+
+    fn set_proxy_mode(&mut self, cx: &mut Cx, mode: ProxyMode) {
+        if self.state.proxy_mode == mode {
+            return;
+        }
+        info!("proxy mode switch requested: {:?}", mode);
+
+        match self.core.set_mode(mode) {
+            Ok(()) => {
+                self.sync_from_core();
+                info!("proxy mode switched successfully");
+            }
+            Err(error) => {
+                let strings = i18n::strings(self.state.language);
+                error!("proxy mode switch failed: {error}");
+                self.push_notification(
+                    cx,
+                    NotificationLevel::Error,
+                    format!("{}: {error}", strings.proxy_mode_switch_failed_prefix),
+                );
+            }
+        }
         self.refresh_ui(cx);
     }
 
@@ -1187,14 +1738,6 @@ impl App {
                 }
             })
             .unwrap_or_else(|| strings.proxy_groups_protocol_unknown.to_string())
-    }
-
-    fn mock_latency_ms(proxy_name: &str) -> u32 {
-        let mut value: u32 = 17;
-        for byte in proxy_name.as_bytes() {
-            value = value.wrapping_mul(131).wrapping_add(*byte as u32);
-        }
-        20 + (value % 380)
     }
 
     fn push_notification(&mut self, cx: &mut Cx, level: NotificationLevel, message: String) {
@@ -1245,18 +1788,21 @@ impl App {
 
     fn import_profile_from_input(&mut self, cx: &mut Cx) {
         if self.import_rx.is_some() {
+            warn!("skip profile import: previous import task still running");
             return;
         }
 
         let strings = i18n::strings(self.state.language);
         let url = self.state.profile_url_input.trim().to_string();
         if url.is_empty() {
+            warn!("skip profile import: url is empty");
             let message = strings.profiles_import_error.to_string();
             self.set_import_status_error(message.clone());
             self.push_notification(cx, NotificationLevel::Error, message);
             self.refresh_ui(cx);
             return;
         }
+        info!("profile import requested");
         if !self.import_poll_timer.is_empty() {
             cx.stop_timer(self.import_poll_timer);
             self.import_poll_timer = Timer::default();
@@ -1304,6 +1850,7 @@ impl App {
                 self.state.profile_url_input.clear();
                 self.state.import_status.message = strings.profiles_import_success.to_string();
                 self.state.import_status.is_error = false;
+                info!("profile import succeeded");
                 self.push_notification(
                     cx,
                     NotificationLevel::Success,
@@ -1314,7 +1861,130 @@ impl App {
                 let strings = i18n::strings(self.state.language);
                 let message = format!("{} ({error})", strings.profiles_import_error);
                 self.set_import_status_error(message.clone());
+                error!("profile import failed: {error}");
                 self.push_notification(cx, NotificationLevel::Error, message);
+            }
+        }
+        self.refresh_ui(cx);
+    }
+
+    fn stop_core_task_polling(&mut self, cx: &mut Cx) {
+        if !self.core_task_timer.is_empty() {
+            cx.stop_timer(self.core_task_timer);
+            self.core_task_timer = Timer::default();
+        }
+        self.core_task_rx = None;
+        self.core_task_kind = None;
+    }
+
+    fn start_core_upgrade(&mut self, cx: &mut Cx) {
+        if self.core_task_rx.is_some() {
+            warn!("skip core upgrade: task already running");
+            return;
+        }
+        info!("core upgrade requested");
+
+        let core = self.core.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<CoreTaskResult>();
+        thread::spawn(move || {
+            let result = core
+                .upgrade_kernel_binary()
+                .and_then(|info| {
+                    core.verify_kernel_binary()?;
+                    Ok(CoreTaskOutput::Upgraded(info))
+                })
+                .map_err(|error| error.to_string());
+            let _ = tx.send(result);
+        });
+
+        if !self.core_task_timer.is_empty() {
+            cx.stop_timer(self.core_task_timer);
+        }
+        self.core_task_rx = Some(rx);
+        self.core_task_kind = Some(CoreTaskKind::Upgrading);
+        self.core_task_timer = cx.start_interval(0.1);
+        self.refresh_ui(cx);
+    }
+
+    fn start_core_restart(&mut self, cx: &mut Cx) {
+        if self.core_task_rx.is_some() {
+            warn!("skip core restart: task already running");
+            return;
+        }
+        info!("core restart requested");
+
+        let core = self.core.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<CoreTaskResult>();
+        thread::spawn(move || {
+            let result = core
+                .restart_kernel_runtime()
+                .map(|_| CoreTaskOutput::Restarted)
+                .map_err(|error| error.to_string());
+            let _ = tx.send(result);
+        });
+
+        if !self.core_task_timer.is_empty() {
+            cx.stop_timer(self.core_task_timer);
+        }
+        self.core_task_rx = Some(rx);
+        self.core_task_kind = Some(CoreTaskKind::Restarting);
+        self.core_task_timer = cx.start_interval(0.1);
+        self.refresh_ui(cx);
+    }
+
+    fn poll_core_task(&mut self, cx: &mut Cx) {
+        let Some(core_task_rx) = self.core_task_rx.as_ref() else {
+            return;
+        };
+
+        let result = match core_task_rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                Some(Err("core worker disconnected".to_string()))
+            }
+        };
+        let Some(result) = result else {
+            return;
+        };
+
+        let task_kind = self.core_task_kind;
+        self.stop_core_task_polling(cx);
+        let strings = i18n::strings(self.state.language);
+        match result {
+            Ok(CoreTaskOutput::Upgraded(info)) => {
+                self.sync_from_core();
+                info!("core upgrade succeeded: version={}", info.version);
+                self.push_notification(
+                    cx,
+                    NotificationLevel::Success,
+                    format!(
+                        "{}: {} ({})",
+                        strings.clash_core_upgrade_success_prefix, info.version, info.asset_name
+                    ),
+                );
+            }
+            Ok(CoreTaskOutput::Restarted) => {
+                self.sync_from_core();
+                info!("core restart succeeded");
+                self.push_notification(
+                    cx,
+                    NotificationLevel::Success,
+                    strings.clash_core_restart_success.to_string(),
+                );
+            }
+            Err(error) => {
+                error!("core task failed: {error}");
+                let prefix = match task_kind {
+                    Some(CoreTaskKind::Upgrading) => strings.clash_core_upgrade_failed_prefix,
+                    Some(CoreTaskKind::Restarting) => strings.clash_core_restart_failed_prefix,
+                    None => strings.clash_core_upgrade_failed_prefix,
+                };
+                self.push_notification(
+                    cx,
+                    NotificationLevel::Error,
+                    format!("{prefix}: {error}"),
+                );
             }
         }
         self.refresh_ui(cx);
@@ -1403,16 +2073,27 @@ impl App {
     }
 
     fn load_persisted_settings(&mut self) {
-        if let Some((language, theme, system_proxy, auto_launch, silent_start, clash_mixed_port)) =
-            settings_store::load()
-        {
-            self.state.language = language;
-            self.state.theme = theme;
-            self.state.system_proxy_enabled = system_proxy;
-            self.state.auto_launch_enabled = auto_launch;
-            self.state.silent_start_enabled = silent_start;
-            self.state.clash_mixed_port = clash_mixed_port;
-            self.state.clash_port_input = clash_mixed_port.to_string();
+        if let Some(loaded) = settings_store::load() {
+            self.state.language = loaded.language;
+            self.state.theme = loaded.theme;
+            self.state.system_proxy_enabled = loaded.system_proxy_enabled;
+            self.state.auto_launch_enabled = loaded.auto_launch_enabled;
+            self.state.silent_start_enabled = loaded.silent_start_enabled;
+            self.state.clash_mixed_port = loaded.clash_mixed_port;
+            self.state.clash_port_input = loaded.clash_mixed_port.to_string();
+            self.saved_proxy_group_selections = loaded.proxy_group_selections;
+            info!("loaded persisted settings");
+        } else {
+            info!("no persisted settings found, using defaults");
+        }
+    }
+
+    fn sync_startup_state_from_core(&mut self) {
+        if let Ok(status) = self.core.startup_status() {
+            self.state.auto_launch_enabled = status.auto_launch;
+            if status.auto_launch {
+                self.state.silent_start_enabled = status.silent_start;
+            }
         }
     }
 
@@ -1424,6 +2105,7 @@ impl App {
             self.state.auto_launch_enabled,
             self.state.silent_start_enabled,
             self.state.clash_mixed_port,
+            &self.saved_proxy_group_selections,
         );
     }
 
@@ -1436,8 +2118,10 @@ impl App {
     fn load_persisted_profiles(&mut self) {
         let profiles = profile_store::load();
         if profiles.is_empty() {
+            info!("no persisted profiles found");
             return;
         }
+        info!("loaded persisted profiles: count={}", profiles.len());
         self.core.replace_profiles(profiles);
     }
 
@@ -1749,23 +2433,7 @@ impl App {
                 },
             );
         self.ui
-            .label(ids!(dashboard.clash_core_path_label))
-            .apply_over(
-                cx,
-                live! {
-                    draw_text: { color: (palette.text_primary) }
-                },
-            );
-        self.ui
             .label(ids!(dashboard.clash_core_version_value))
-            .apply_over(
-                cx,
-                live! {
-                    draw_text: { color: (palette.text_muted) }
-                },
-            );
-        self.ui
-            .label(ids!(dashboard.clash_core_path_value))
             .apply_over(
                 cx,
                 live! {
@@ -1917,28 +2585,6 @@ impl App {
             );
 
         self.ui
-            .label(ids!(dashboard.proxy_groups_title))
-            .apply_over(
-                cx,
-                live! {
-                    draw_text: { color: (palette.text_primary) }
-                },
-            );
-        self.ui.label(ids!(dashboard.proxy_groups_desc)).apply_over(
-            cx,
-            live! {
-                draw_text: { color: (palette.text_muted) }
-            },
-        );
-        self.ui
-            .label(ids!(dashboard.proxy_groups_count))
-            .apply_over(
-                cx,
-                live! {
-                    draw_text: { color: (palette.text_primary) }
-                },
-            );
-        self.ui
             .label(ids!(dashboard.proxy_groups_empty))
             .apply_over(
                 cx,
@@ -2079,6 +2725,63 @@ impl App {
         }
     }
 
+    fn apply_proxy_mode_button_style(
+        &mut self,
+        cx: &mut Cx,
+        id: &[LiveId; 2],
+        active: bool,
+        palette: ThemePalette,
+    ) {
+        let button = self.ui.widget(id);
+        if active {
+            button.apply_over(
+                cx,
+                live! {
+                    draw_bg: {
+                        color: (palette.menu_active_bg),
+                        color_hover: (palette.menu_active_hover),
+                        color_pressed: (palette.menu_active_pressed)
+                    }
+                    draw_text: { color: (palette.text_primary) }
+                },
+            );
+        } else {
+            button.apply_over(
+                cx,
+                live! {
+                    draw_bg: {
+                        color: (palette.panel_bg),
+                        color_hover: (palette.panel_alt_bg),
+                        color_pressed: (palette.panel_alt_bg)
+                    }
+                    draw_text: { color: (palette.text_muted) }
+                },
+            );
+        }
+    }
+
+    fn apply_proxy_mode_buttons(&mut self, cx: &mut Cx) {
+        let palette = self.theme_palette();
+        self.apply_proxy_mode_button_style(
+            cx,
+            ids!(dashboard.proxy_mode_rule_btn),
+            self.state.proxy_mode == ProxyMode::Rule,
+            palette,
+        );
+        self.apply_proxy_mode_button_style(
+            cx,
+            ids!(dashboard.proxy_mode_global_btn),
+            self.state.proxy_mode == ProxyMode::Global,
+            palette,
+        );
+        self.apply_proxy_mode_button_style(
+            cx,
+            ids!(dashboard.proxy_mode_direct_btn),
+            self.state.proxy_mode == ProxyMode::Direct,
+            palette,
+        );
+    }
+
     fn update_menu_buttons(&mut self, cx: &mut Cx) {
         let palette = self.theme_palette();
         self.apply_menu_button_style(
@@ -2121,11 +2824,24 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        Self::init_logging();
+        info!("linkpad startup begin");
         self.load_persisted_settings();
+        let _ = self
+            .core
+            .configure_startup(self.state.auto_launch_enabled, self.state.silent_start_enabled);
+        self.sync_startup_state_from_core();
         self.apply_clash_config_to_core();
         self.load_persisted_profiles();
         self.sync_from_core();
+        self.persist_profiles();
         self.set_import_status_ready();
+        info!(
+            "linkpad startup complete: profiles={}, groups={}, rules={}",
+            self.state.profiles.len(),
+            self.state.proxy_groups.len(),
+            self.state.rules.len()
+        );
         self.refresh_ui(cx);
     }
 
@@ -2133,9 +2849,18 @@ impl MatchEvent for App {
         if self.import_poll_timer.is_timer(event).is_some() {
             self.poll_profile_import(cx);
         }
+        if self.latency_poll_timer.is_timer(event).is_some() {
+            self.poll_latency_test(cx);
+        }
+        if self.locate_timer.is_timer(event).is_some() {
+            self.perform_pending_locate(cx);
+        }
         if self.notification_timer.is_timer(event).is_some() {
             self.dismiss_notification(cx);
             self.refresh_ui(cx);
+        }
+        if self.core_task_timer.is_timer(event).is_some() {
+            self.poll_core_task(cx);
         }
     }
 
@@ -2252,6 +2977,33 @@ impl MatchEvent for App {
             if self.ui.mp_button(row_ids.open_btn).clicked(actions) {
                 self.select_active_proxy_group(cx, index);
             }
+            if self.ui.mp_button(row_ids.test_btn).clicked(actions) {
+                self.start_latency_test_for_group(cx, index);
+            }
+            if self.ui.mp_button(row_ids.locate_btn).clicked(actions) {
+                self.locate_selected_proxy_for_group(cx, index);
+            }
+        }
+        if self
+            .ui
+            .mp_button(ids!(dashboard.proxy_mode_rule_btn))
+            .clicked(actions)
+        {
+            self.set_proxy_mode(cx, ProxyMode::Rule);
+        }
+        if self
+            .ui
+            .mp_button(ids!(dashboard.proxy_mode_global_btn))
+            .clicked(actions)
+        {
+            self.set_proxy_mode(cx, ProxyMode::Global);
+        }
+        if self
+            .ui
+            .mp_button(ids!(dashboard.proxy_mode_direct_btn))
+            .clicked(actions)
+        {
+            self.set_proxy_mode(cx, ProxyMode::Direct);
         }
         for (group_index, _) in Self::proxy_group_rows().iter().enumerate() {
             let item_count = self
@@ -2273,6 +3025,7 @@ impl MatchEvent for App {
             .changed(actions)
         {
             self.state.rules_query = value;
+            self.reset_rules_pagination();
             self.refresh_ui(cx);
         }
         if self
@@ -2281,6 +3034,7 @@ impl MatchEvent for App {
             .clicked(actions)
         {
             self.state.rules_filter = RuleFilter::All;
+            self.reset_rules_pagination();
             self.refresh_ui(cx);
         }
         if self
@@ -2289,6 +3043,7 @@ impl MatchEvent for App {
             .clicked(actions)
         {
             self.state.rules_filter = RuleFilter::Domain;
+            self.reset_rules_pagination();
             self.refresh_ui(cx);
         }
         if self
@@ -2297,6 +3052,7 @@ impl MatchEvent for App {
             .clicked(actions)
         {
             self.state.rules_filter = RuleFilter::IpCidr;
+            self.reset_rules_pagination();
             self.refresh_ui(cx);
         }
         if self
@@ -2305,6 +3061,7 @@ impl MatchEvent for App {
             .clicked(actions)
         {
             self.state.rules_filter = RuleFilter::ProcessName;
+            self.reset_rules_pagination();
             self.refresh_ui(cx);
         }
         if let Some(on) = self
@@ -2313,6 +3070,7 @@ impl MatchEvent for App {
             .changed(actions)
         {
             let strings = i18n::strings(self.state.language);
+            info!("system proxy toggle requested: on={on}");
             let result = if on {
                 self.core.enable_system_proxy()
             } else {
@@ -2322,11 +3080,17 @@ impl MatchEvent for App {
             match result {
                 Ok(()) => {
                     self.state.system_proxy_enabled = on;
+                    if on {
+                        self.apply_saved_proxy_group_selections_to_core();
+                        self.sync_from_core();
+                        self.snapshot_proxy_group_selections();
+                    }
                     let message = if on {
                         strings.system_proxy_enable_success
                     } else {
                         strings.system_proxy_disable_success
                     };
+                    info!("system proxy toggle succeeded: on={on}");
                     self.push_notification(cx, NotificationLevel::Success, message.to_string());
                 }
                 Err(error) => {
@@ -2336,6 +3100,7 @@ impl MatchEvent for App {
                     } else {
                         format!("{}: {error}", strings.system_proxy_disable_failed_prefix)
                     };
+                    error!("system proxy toggle failed: {error}");
                     self.push_notification(cx, NotificationLevel::Error, message);
                 }
             }
@@ -2347,8 +3112,23 @@ impl MatchEvent for App {
             .mp_switch(ids!(dashboard.auto_launch_switch))
             .changed(actions)
         {
+            let previous = self.state.auto_launch_enabled;
             self.state.auto_launch_enabled = on;
-            self.persist_settings();
+            if let Err(error) = self
+                .core
+                .configure_startup(self.state.auto_launch_enabled, self.state.silent_start_enabled)
+            {
+                let strings = i18n::strings(self.state.language);
+                self.state.auto_launch_enabled = previous;
+                self.push_notification(
+                    cx,
+                    NotificationLevel::Error,
+                    format!("{}: {error}", strings.auto_launch_update_failed_prefix),
+                );
+            } else {
+                self.sync_startup_state_from_core();
+                self.persist_settings();
+            }
             self.refresh_ui(cx);
         }
         if let Some(on) = self
@@ -2356,7 +3136,24 @@ impl MatchEvent for App {
             .mp_switch(ids!(dashboard.silent_start_switch))
             .changed(actions)
         {
+            let previous = self.state.silent_start_enabled;
             self.state.silent_start_enabled = on;
+            if self.state.auto_launch_enabled {
+                if let Err(error) = self
+                    .core
+                    .configure_startup(self.state.auto_launch_enabled, self.state.silent_start_enabled)
+                {
+                    let strings = i18n::strings(self.state.language);
+                    self.state.silent_start_enabled = previous;
+                    self.push_notification(
+                        cx,
+                        NotificationLevel::Error,
+                        format!("{}: {error}", strings.silent_start_update_failed_prefix),
+                    );
+                } else {
+                    self.sync_startup_state_from_core();
+                }
+            }
             self.persist_settings();
             self.refresh_ui(cx);
         }
@@ -2377,6 +3174,20 @@ impl MatchEvent for App {
             self.state.theme = ThemePreference::from_index(index);
             self.persist_settings();
             self.refresh_ui(cx);
+        }
+        if self
+            .ui
+            .mp_button(ids!(dashboard.clash_core_upgrade_btn))
+            .clicked(actions)
+        {
+            self.start_core_upgrade(cx);
+        }
+        if self
+            .ui
+            .mp_button(ids!(dashboard.clash_core_restart_btn))
+            .clicked(actions)
+        {
+            self.start_core_restart(cx);
         }
         if self
             .ui
