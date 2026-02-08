@@ -8,6 +8,7 @@ live_design! {
     use makepad_components::dropdown::*;
     use makepad_components::input::*;
     use makepad_components::layout::*;
+    use makepad_components::switch::*;
 
     ProxyOptionCard = <View> {
         width: Fill,
@@ -546,6 +547,113 @@ live_design! {
                                     width: 200,
                                     labels: ["Light", "Dark", "System"],
                                     selected_item: 2
+                                }
+                            }
+                        }
+                    }
+
+                    system_settings_card = <MpCard> {
+                        width: Fill,
+                        <MpCardHeader> {
+                            system_setting_title = <MpCardTitle> { text: "System Setting" }
+                        }
+                        <MpCardContent> {
+                            width: Fill,
+                            flow: Down,
+                            spacing: (SPACE_3),
+
+                            <View> {
+                                width: Fill,
+                                height: Fit,
+                                flow: Right,
+                                align: {y: 0.5},
+                                spacing: (SPACE_3),
+
+                                system_proxy_label = <Label> {text: "System Proxy", draw_text: {text_style: <APP_FONT_BODY>{}, color: (TEXT_PRIMARY)}}
+                                <View> {width: Fill, height: Fit}
+                                system_proxy_switch = <MpSwitch> {}
+                            }
+
+                            <View> {
+                                width: Fill,
+                                height: Fit,
+                                flow: Right,
+                                align: {y: 0.5},
+                                spacing: (SPACE_3),
+
+                                auto_launch_label = <Label> {text: "Auto Launch", draw_text: {text_style: <APP_FONT_BODY>{}, color: (TEXT_PRIMARY)}}
+                                <View> {width: Fill, height: Fit}
+                                auto_launch_switch = <MpSwitch> {}
+                            }
+
+                            <View> {
+                                width: Fill,
+                                height: Fit,
+                                flow: Right,
+                                align: {y: 0.5},
+                                spacing: (SPACE_3),
+
+                                silent_start_label = <Label> {text: "Silent Start", draw_text: {text_style: <APP_FONT_BODY>{}, color: (TEXT_PRIMARY)}}
+                                <View> {width: Fill, height: Fit}
+                                silent_start_switch = <MpSwitch> {}
+                            }
+                        }
+                    }
+
+                    clash_settings_card = <MpCard> {
+                        width: Fill,
+                        <MpCardHeader> {
+                            clash_setting_title = <MpCardTitle> { text: "Clash Setting" }
+                        }
+                        <MpCardContent> {
+                            width: Fill,
+                            flow: Down,
+                            spacing: (SPACE_3),
+
+                            <View> {
+                                width: Fill,
+                                height: Fit,
+                                flow: Right,
+                                align: {y: 0.5},
+                                spacing: (SPACE_3),
+
+                                clash_port_label = <Label> {text: "Port Config", draw_text: {text_style: <APP_FONT_BODY>{}, color: (TEXT_PRIMARY)}}
+                                <View> {width: Fill, height: Fit}
+                                clash_port_input = <MpInput> {
+                                    width: 120
+                                    empty_text: "7890"
+                                }
+                                clash_port_save_btn = <MpButtonPrimary> {
+                                    text: "Save"
+                                }
+                            }
+
+                            <View> {
+                                width: Fill,
+                                height: Fit,
+                                flow: Right,
+                                align: {y: 0.5},
+                                spacing: (SPACE_3),
+
+                                clash_core_version_label = <Label> {text: "Clash Core Version", draw_text: {text_style: <APP_FONT_BODY>{}, color: (TEXT_PRIMARY)}}
+                                <View> {width: Fill, height: Fit}
+                                clash_core_version_value = <Label> {
+                                    text: "Unknown"
+                                    draw_text: {text_style: <APP_FONT_BODY>{}, color: (TEXT_MUTED)}
+                                }
+                            }
+
+                            <View> {
+                                width: Fill,
+                                height: Fit,
+                                flow: Down,
+                                spacing: (SPACE_1),
+
+                                clash_core_path_label = <Label> {text: "Clash Core Path", draw_text: {text_style: <APP_FONT_BODY>{}, color: (TEXT_PRIMARY)}}
+                                clash_core_path_value = <Label> {
+                                    width: Fill
+                                    text: "-"
+                                    draw_text: {text_style: <APP_FONT_CAPTION>{}, wrap: Word, color: (TEXT_MUTED)}
                                 }
                             }
                         }

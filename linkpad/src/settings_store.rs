@@ -7,19 +7,41 @@ use std::path::PathBuf;
 struct PersistedSettings {
     language: String,
     theme: String,
+    #[serde(default)]
+    system_proxy_enabled: bool,
+    #[serde(default)]
+    auto_launch_enabled: bool,
+    #[serde(default)]
+    silent_start_enabled: bool,
+    #[serde(default = "default_mixed_port")]
+    clash_mixed_port: u16,
 }
 
-pub fn load() -> Option<(Language, ThemePreference)> {
+pub fn load() -> Option<(Language, ThemePreference, bool, bool, bool, u16)> {
     let path = settings_path()?;
     let content = fs::read_to_string(path).ok()?;
     let persisted: PersistedSettings = serde_json::from_str(&content).ok()?;
 
     let language = parse_language(&persisted.language).unwrap_or(Language::English);
     let theme = parse_theme(&persisted.theme).unwrap_or(ThemePreference::System);
-    Some((language, theme))
+    Some((
+        language,
+        theme,
+        persisted.system_proxy_enabled,
+        persisted.auto_launch_enabled,
+        persisted.silent_start_enabled,
+        normalize_port(persisted.clash_mixed_port),
+    ))
 }
 
-pub fn save(language: Language, theme: ThemePreference) -> std::io::Result<()> {
+pub fn save(
+    language: Language,
+    theme: ThemePreference,
+    system_proxy_enabled: bool,
+    auto_launch_enabled: bool,
+    silent_start_enabled: bool,
+    clash_mixed_port: u16,
+) -> std::io::Result<()> {
     let path = match settings_path() {
         Some(path) => path,
         None => return Ok(()),
@@ -32,6 +54,10 @@ pub fn save(language: Language, theme: ThemePreference) -> std::io::Result<()> {
     let persisted = PersistedSettings {
         language: serialize_language(language).to_string(),
         theme: serialize_theme(theme).to_string(),
+        system_proxy_enabled,
+        auto_launch_enabled,
+        silent_start_enabled,
+        clash_mixed_port: normalize_port(clash_mixed_port),
     };
 
     let json = serde_json::to_string_pretty(&persisted).unwrap_or_else(|_| "{}".to_string());
@@ -74,5 +100,17 @@ fn serialize_theme(theme: ThemePreference) -> &'static str {
         ThemePreference::Light => "light",
         ThemePreference::Dark => "dark",
         ThemePreference::System => "system",
+    }
+}
+
+fn default_mixed_port() -> u16 {
+    7890
+}
+
+fn normalize_port(port: u16) -> u16 {
+    if port == 0 {
+        default_mixed_port()
+    } else {
+        port
     }
 }

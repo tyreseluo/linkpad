@@ -8,6 +8,7 @@ use crate::state::{
 use linkpad_core::Core as LinkpadCore;
 use makepad_components::button::MpButtonWidgetRefExt;
 use makepad_components::makepad_widgets::*;
+use makepad_components::switch::MpSwitchWidgetRefExt;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::thread;
 
@@ -71,8 +72,9 @@ live_design! {
                                 draw_text: {text_style: <APP_FONT_BODY>{}, color: (TEXT_PRIMARY)}
                             }
                             toast_message = <Label> {
+                                width: 312,
                                 text: ""
-                                draw_text: {text_style: <APP_FONT_CAPTION>{}, color: (TEXT_MUTED)}
+                                draw_text: {text_style: <APP_FONT_CAPTION>{}, wrap: Word, color: (TEXT_MUTED)}
                             }
                         }
                     }
@@ -425,11 +427,47 @@ impl App {
             .label(ids!(dashboard.basic_setting_title))
             .set_text(cx, strings.basic_setting_title);
         self.ui
+            .label(ids!(dashboard.system_setting_title))
+            .set_text(cx, strings.system_setting_title);
+        self.ui
+            .label(ids!(dashboard.clash_setting_title))
+            .set_text(cx, strings.clash_setting_title);
+        self.ui
             .label(ids!(dashboard.language_label))
             .set_text(cx, strings.language_label);
         self.ui
             .label(ids!(dashboard.theme_label))
             .set_text(cx, strings.theme_label);
+        self.ui
+            .label(ids!(dashboard.system_proxy_label))
+            .set_text(cx, strings.system_proxy_label);
+        self.ui
+            .label(ids!(dashboard.auto_launch_label))
+            .set_text(cx, strings.auto_launch_label);
+        self.ui
+            .label(ids!(dashboard.silent_start_label))
+            .set_text(cx, strings.silent_start_label);
+        self.ui
+            .label(ids!(dashboard.clash_port_label))
+            .set_text(cx, strings.clash_port_label);
+        self.ui
+            .label(ids!(dashboard.clash_core_version_label))
+            .set_text(cx, strings.clash_core_version_label);
+        self.ui
+            .label(ids!(dashboard.clash_core_path_label))
+            .set_text(cx, strings.clash_core_path_label);
+        self.ui
+            .mp_button(ids!(dashboard.clash_port_save_btn))
+            .set_text(strings.clash_port_save_button);
+        self.ui
+            .text_input(ids!(dashboard.clash_port_input))
+            .set_text(cx, &self.state.clash_port_input);
+        self.ui
+            .label(ids!(dashboard.clash_core_version_value))
+            .set_text(cx, &self.state.clash_core_version);
+        self.ui
+            .label(ids!(dashboard.clash_core_path_value))
+            .set_text(cx, &self.state.clash_core_path);
 
         let language_dropdown = self.ui.drop_down(ids!(dashboard.language_dropdown));
         language_dropdown.set_labels(cx, i18n::language_options(self.state.language));
@@ -438,6 +476,16 @@ impl App {
         let theme_dropdown = self.ui.drop_down(ids!(dashboard.theme_dropdown));
         theme_dropdown.set_labels(cx, i18n::theme_options(self.state.language));
         theme_dropdown.set_selected_item(cx, self.state.theme.as_index());
+
+        self.ui
+            .mp_switch(ids!(dashboard.system_proxy_switch))
+            .set_on(cx, self.state.system_proxy_enabled);
+        self.ui
+            .mp_switch(ids!(dashboard.auto_launch_switch))
+            .set_on(cx, self.state.auto_launch_enabled);
+        self.ui
+            .mp_switch(ids!(dashboard.silent_start_switch))
+            .set_on(cx, self.state.silent_start_enabled);
     }
 
     fn apply_notification_state(&mut self, cx: &mut Cx, _strings: &i18n::Strings) {
@@ -1058,6 +1106,20 @@ impl App {
         if !active_exists {
             self.state.active_proxy_group = self.state.proxy_groups.first().map(|g| g.name.clone());
         }
+
+        let config = self.core.config();
+        self.state.clash_mixed_port = config.mixed_port;
+        self.state.clash_port_input = config.mixed_port.to_string();
+
+        let kernel_info = self.core.kernel_info();
+        self.state.clash_core_version = kernel_info
+            .version
+            .unwrap_or_else(|| "Not Found".to_string());
+        self.state.clash_core_path = match kernel_info.binary_path {
+            Some(path) => path,
+            None => format!("{} (missing)", kernel_info.suggested_path),
+        };
+        self.state.system_proxy_enabled = self.core.is_system_proxy_enabled();
     }
 
     fn select_active_proxy_group(&mut self, cx: &mut Cx, row_index: usize) {
@@ -1341,14 +1403,34 @@ impl App {
     }
 
     fn load_persisted_settings(&mut self) {
-        if let Some((language, theme)) = settings_store::load() {
+        if let Some((language, theme, system_proxy, auto_launch, silent_start, clash_mixed_port)) =
+            settings_store::load()
+        {
             self.state.language = language;
             self.state.theme = theme;
+            self.state.system_proxy_enabled = system_proxy;
+            self.state.auto_launch_enabled = auto_launch;
+            self.state.silent_start_enabled = silent_start;
+            self.state.clash_mixed_port = clash_mixed_port;
+            self.state.clash_port_input = clash_mixed_port.to_string();
         }
     }
 
     fn persist_settings(&self) {
-        let _ = settings_store::save(self.state.language, self.state.theme);
+        let _ = settings_store::save(
+            self.state.language,
+            self.state.theme,
+            self.state.system_proxy_enabled,
+            self.state.auto_launch_enabled,
+            self.state.silent_start_enabled,
+            self.state.clash_mixed_port,
+        );
+    }
+
+    fn apply_clash_config_to_core(&mut self) {
+        let mut config = self.core.config();
+        config.mixed_port = self.state.clash_mixed_port;
+        let _ = self.core.update_config(config);
     }
 
     fn load_persisted_profiles(&mut self) {
@@ -1428,6 +1510,22 @@ impl App {
 
         self.ui
             .widget(ids!(dashboard.basic_settings_card))
+            .apply_over(
+                cx,
+                live! {
+                    draw_bg: { color: (palette.panel_alt_bg) }
+                },
+            );
+        self.ui
+            .widget(ids!(dashboard.system_settings_card))
+            .apply_over(
+                cx,
+                live! {
+                    draw_bg: { color: (palette.panel_alt_bg) }
+                },
+            );
+        self.ui
+            .widget(ids!(dashboard.clash_settings_card))
             .apply_over(
                 cx,
                 live! {
@@ -1523,6 +1621,26 @@ impl App {
         self.apply_dropdown_theme(cx, ids!(dashboard.language_dropdown), palette);
         self.apply_dropdown_theme(cx, ids!(dashboard.theme_dropdown), palette);
         self.ui
+            .widget(ids!(dashboard.clash_port_input))
+            .apply_over(
+                cx,
+                live! {
+                    draw_bg: {
+                        bg_color: (palette.panel_bg),
+                        bg_color_hover: (palette.panel_bg),
+                        bg_color_focus: (palette.panel_bg),
+                        border_color: (palette.border_color),
+                        border_color_hover: (palette.border_color),
+                        border_color_focus: (palette.menu_active_bg)
+                    }
+                    draw_text: {
+                        color: (palette.text_primary),
+                        color_empty: (palette.text_muted)
+                    }
+                    draw_cursor: { color: (palette.menu_active_bg) }
+                },
+            );
+        self.ui
             .widget(ids!(dashboard.rules_search_input))
             .apply_over(
                 cx,
@@ -1564,6 +1682,22 @@ impl App {
                     draw_text: { color: (palette.text_primary) }
                 },
             );
+        self.ui
+            .label(ids!(dashboard.system_setting_title))
+            .apply_over(
+                cx,
+                live! {
+                    draw_text: { color: (palette.text_primary) }
+                },
+            );
+        self.ui
+            .label(ids!(dashboard.clash_setting_title))
+            .apply_over(
+                cx,
+                live! {
+                    draw_text: { color: (palette.text_primary) }
+                },
+            );
         self.ui.label(ids!(dashboard.language_label)).apply_over(
             cx,
             live! {
@@ -1576,6 +1710,68 @@ impl App {
                 draw_text: { color: (palette.text_primary) }
             },
         );
+        self.ui
+            .label(ids!(dashboard.system_proxy_label))
+            .apply_over(
+                cx,
+                live! {
+                    draw_text: { color: (palette.text_primary) }
+                },
+            );
+        self.ui.label(ids!(dashboard.auto_launch_label)).apply_over(
+            cx,
+            live! {
+                draw_text: { color: (palette.text_primary) }
+            },
+        );
+        self.ui
+            .label(ids!(dashboard.silent_start_label))
+            .apply_over(
+                cx,
+                live! {
+                    draw_text: { color: (palette.text_primary) }
+                },
+            );
+        self.ui
+            .label(ids!(dashboard.clash_port_label))
+            .apply_over(
+                cx,
+                live! {
+                    draw_text: { color: (palette.text_primary) }
+                },
+            );
+        self.ui
+            .label(ids!(dashboard.clash_core_version_label))
+            .apply_over(
+                cx,
+                live! {
+                    draw_text: { color: (palette.text_primary) }
+                },
+            );
+        self.ui
+            .label(ids!(dashboard.clash_core_path_label))
+            .apply_over(
+                cx,
+                live! {
+                    draw_text: { color: (palette.text_primary) }
+                },
+            );
+        self.ui
+            .label(ids!(dashboard.clash_core_version_value))
+            .apply_over(
+                cx,
+                live! {
+                    draw_text: { color: (palette.text_muted) }
+                },
+            );
+        self.ui
+            .label(ids!(dashboard.clash_core_path_value))
+            .apply_over(
+                cx,
+                live! {
+                    draw_text: { color: (palette.text_muted) }
+                },
+            );
 
         self.ui.label(ids!(dashboard.profile_url_label)).apply_over(
             cx,
@@ -1926,6 +2122,7 @@ impl App {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.load_persisted_settings();
+        self.apply_clash_config_to_core();
         self.load_persisted_profiles();
         self.sync_from_core();
         self.set_import_status_ready();
@@ -1973,6 +2170,13 @@ impl MatchEvent for App {
             .changed(actions)
         {
             self.state.profile_url_input = value;
+        }
+        if let Some(value) = self
+            .ui
+            .text_input(ids!(dashboard.clash_port_input))
+            .changed(actions)
+        {
+            self.state.clash_port_input = value;
         }
         if self
             .ui
@@ -2103,6 +2307,59 @@ impl MatchEvent for App {
             self.state.rules_filter = RuleFilter::ProcessName;
             self.refresh_ui(cx);
         }
+        if let Some(on) = self
+            .ui
+            .mp_switch(ids!(dashboard.system_proxy_switch))
+            .changed(actions)
+        {
+            let strings = i18n::strings(self.state.language);
+            let result = if on {
+                self.core.enable_system_proxy()
+            } else {
+                self.core.disable_system_proxy()
+            };
+
+            match result {
+                Ok(()) => {
+                    self.state.system_proxy_enabled = on;
+                    let message = if on {
+                        strings.system_proxy_enable_success
+                    } else {
+                        strings.system_proxy_disable_success
+                    };
+                    self.push_notification(cx, NotificationLevel::Success, message.to_string());
+                }
+                Err(error) => {
+                    self.state.system_proxy_enabled = self.core.is_system_proxy_enabled();
+                    let message = if on {
+                        format!("{}: {error}", strings.system_proxy_enable_failed_prefix)
+                    } else {
+                        format!("{}: {error}", strings.system_proxy_disable_failed_prefix)
+                    };
+                    self.push_notification(cx, NotificationLevel::Error, message);
+                }
+            }
+            self.persist_settings();
+            self.refresh_ui(cx);
+        }
+        if let Some(on) = self
+            .ui
+            .mp_switch(ids!(dashboard.auto_launch_switch))
+            .changed(actions)
+        {
+            self.state.auto_launch_enabled = on;
+            self.persist_settings();
+            self.refresh_ui(cx);
+        }
+        if let Some(on) = self
+            .ui
+            .mp_switch(ids!(dashboard.silent_start_switch))
+            .changed(actions)
+        {
+            self.state.silent_start_enabled = on;
+            self.persist_settings();
+            self.refresh_ui(cx);
+        }
         if let Some(index) = self
             .ui
             .drop_down(ids!(dashboard.language_dropdown))
@@ -2119,6 +2376,45 @@ impl MatchEvent for App {
         {
             self.state.theme = ThemePreference::from_index(index);
             self.persist_settings();
+            self.refresh_ui(cx);
+        }
+        if self
+            .ui
+            .mp_button(ids!(dashboard.clash_port_save_btn))
+            .clicked(actions)
+        {
+            let strings = i18n::strings(self.state.language);
+            let trimmed = self.state.clash_port_input.trim();
+            let parsed = trimmed.parse::<u16>().ok().filter(|port| *port > 0);
+            if let Some(port) = parsed {
+                let mut config = self.core.config();
+                config.mixed_port = port;
+                match self.core.update_config(config) {
+                    Ok(()) => {
+                        self.state.clash_mixed_port = port;
+                        self.state.clash_port_input = port.to_string();
+                        self.persist_settings();
+                        self.push_notification(
+                            cx,
+                            NotificationLevel::Success,
+                            strings.clash_port_update_success.to_string(),
+                        );
+                    }
+                    Err(error) => {
+                        self.push_notification(
+                            cx,
+                            NotificationLevel::Error,
+                            format!("{}: {error}", strings.clash_port_update_failed_prefix),
+                        );
+                    }
+                }
+            } else {
+                self.push_notification(
+                    cx,
+                    NotificationLevel::Error,
+                    strings.clash_port_update_invalid.to_string(),
+                );
+            }
             self.refresh_ui(cx);
         }
     }

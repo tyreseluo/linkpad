@@ -15,6 +15,13 @@ pub struct AppState {
     pub rules_filter: RuleFilter,
     pub active_proxy_group: Option<String>,
     pub proxy_group_selected: HashMap<String, usize>,
+    pub system_proxy_enabled: bool,
+    pub auto_launch_enabled: bool,
+    pub silent_start_enabled: bool,
+    pub clash_mixed_port: u16,
+    pub clash_port_input: String,
+    pub clash_core_version: String,
+    pub clash_core_path: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +105,13 @@ impl Default for AppState {
             rules_filter: RuleFilter::All,
             active_proxy_group: None,
             proxy_group_selected: HashMap::new(),
+            system_proxy_enabled: false,
+            auto_launch_enabled: false,
+            silent_start_enabled: false,
+            clash_mixed_port: 7890,
+            clash_port_input: "7890".to_string(),
+            clash_core_version: "Unknown".to_string(),
+            clash_core_path: "-".to_string(),
         }
     }
 }

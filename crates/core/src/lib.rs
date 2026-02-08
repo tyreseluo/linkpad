@@ -10,6 +10,10 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod runtime;
+pub use runtime::KernelInfo;
+use runtime::{KernelRuntime, SystemProxyManager};
+
 pub type CoreResult<T> = Result<T, CoreError>;
 
 #[derive(Debug)]
@@ -44,11 +48,14 @@ pub struct Core {
     inner: Arc<Mutex<CoreState>>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 struct CoreState {
     running: bool,
     config: Config,
     profiles: Vec<Profile>,
+    kernel_runtime: KernelRuntime,
+    system_proxy_manager: SystemProxyManager,
+    system_proxy_enabled: bool,
 }
 
 impl Default for Core {
@@ -65,19 +72,44 @@ impl Core {
     }
 
     pub fn start(&self) -> CoreResult<()> {
+        let (config, active_profile) = {
+            let mut state = self.inner.lock().expect("core state poisoned");
+            if state.running && state.kernel_runtime.is_running() {
+                return Err(CoreError::AlreadyRunning);
+            }
+            state.running = false;
+            (
+                state.config.clone(),
+                state
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.active)
+                    .cloned(),
+            )
+        };
+
+        let active_profile = active_profile.ok_or_else(|| {
+            CoreError::InvalidConfig("no active profile to launch mihomo".to_string())
+        })?;
+        let runtime_config = build_runtime_config_from_profile(&active_profile, &config)?;
+
         let mut state = self.inner.lock().expect("core state poisoned");
-        if state.running {
-            return Err(CoreError::AlreadyRunning);
-        }
+        state.kernel_runtime.start(&runtime_config)?;
         state.running = true;
         Ok(())
     }
 
     pub fn stop(&self) -> CoreResult<()> {
         let mut state = self.inner.lock().expect("core state poisoned");
-        if !state.running {
+        if !state.running && !state.kernel_runtime.is_running() {
             return Err(CoreError::NotRunning);
         }
+
+        if state.system_proxy_enabled {
+            state.system_proxy_manager.disable()?;
+            state.system_proxy_enabled = false;
+        }
+        state.kernel_runtime.stop()?;
         state.running = false;
         Ok(())
     }
@@ -88,7 +120,11 @@ impl Core {
     }
 
     pub fn is_running(&self) -> bool {
-        let state = self.inner.lock().expect("core state poisoned");
+        let mut state = self.inner.lock().expect("core state poisoned");
+        if state.running && !state.kernel_runtime.is_running() {
+            state.running = false;
+            state.system_proxy_enabled = false;
+        }
         state.running
     }
 
@@ -100,6 +136,62 @@ impl Core {
     pub fn update_config(&self, config: Config) -> CoreResult<()> {
         let mut state = self.inner.lock().expect("core state poisoned");
         state.config = config;
+        Ok(())
+    }
+
+    pub fn is_system_proxy_enabled(&self) -> bool {
+        let state = self.inner.lock().expect("core state poisoned");
+        state.system_proxy_enabled
+    }
+
+    pub fn kernel_info(&self) -> KernelInfo {
+        let state = self.inner.lock().expect("core state poisoned");
+        state.kernel_runtime.kernel_info()
+    }
+
+    pub fn enable_system_proxy(&self) -> CoreResult<()> {
+        let port = {
+            let state = self.inner.lock().expect("core state poisoned");
+            if state.system_proxy_enabled {
+                return Ok(());
+            }
+            state.config.mixed_port
+        };
+
+        let started_here = if self.is_running() {
+            false
+        } else {
+            self.start()?;
+            true
+        };
+
+        let mut state = self.inner.lock().expect("core state poisoned");
+        match state.system_proxy_manager.enable("127.0.0.1", port) {
+            Ok(()) => {
+                state.system_proxy_enabled = true;
+                Ok(())
+            }
+            Err(error) => {
+                if started_here {
+                    let _ = state.kernel_runtime.stop();
+                    state.running = false;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn disable_system_proxy(&self) -> CoreResult<()> {
+        let mut state = self.inner.lock().expect("core state poisoned");
+        if state.system_proxy_enabled {
+            state.system_proxy_manager.disable()?;
+            state.system_proxy_enabled = false;
+        }
+
+        if state.running {
+            state.kernel_runtime.stop()?;
+            state.running = false;
+        }
         Ok(())
     }
 
@@ -793,6 +885,56 @@ fn profile_name_from_subscription(source_url: &str, nodes: &[SubscriptionNode]) 
     "imported-subscription".to_string()
 }
 
+fn build_runtime_config_from_profile(profile: &Profile, config: &Config) -> CoreResult<String> {
+    let profile_yaml = if profile.raw_yaml.trim().is_empty() {
+        fetch_profile_content(&profile.source_url)?
+    } else {
+        profile.raw_yaml.clone()
+    };
+    build_runtime_config_yaml(&profile_yaml, config)
+}
+
+fn build_runtime_config_yaml(profile_yaml: &str, config: &Config) -> CoreResult<String> {
+    let mut root_value: serde_yaml::Value =
+        serde_yaml::from_str(profile_yaml).map_err(|error| CoreError::Parse(error.to_string()))?;
+    let root = root_value.as_mapping_mut().ok_or_else(|| {
+        CoreError::InvalidConfig("mihomo config root must be a YAML mapping".to_string())
+    })?;
+
+    set_mapping_value(
+        root,
+        "mixed-port",
+        serde_yaml::Value::Number(serde_yaml::Number::from(config.mixed_port)),
+    );
+    set_mapping_value(root, "allow-lan", serde_yaml::Value::Bool(config.allow_lan));
+    set_mapping_value(
+        root,
+        "mode",
+        serde_yaml::Value::String(proxy_mode_name(&config.mode).to_string()),
+    );
+    if !root.contains_key(serde_yaml::Value::String("external-controller".to_string())) {
+        set_mapping_value(
+            root,
+            "external-controller",
+            serde_yaml::Value::String("127.0.0.1:9097".to_string()),
+        );
+    }
+
+    serde_yaml::to_string(&root_value).map_err(|error| CoreError::InvalidConfig(error.to_string()))
+}
+
+fn set_mapping_value(root: &mut serde_yaml::Mapping, key: &str, value: serde_yaml::Value) {
+    root.insert(serde_yaml::Value::String(key.to_string()), value);
+}
+
+fn proxy_mode_name(mode: &ProxyMode) -> &'static str {
+    match mode {
+        ProxyMode::Rule => "rule",
+        ProxyMode::Global => "global",
+        ProxyMode::Direct => "direct",
+    }
+}
+
 fn build_profile_id(source_url: &str) -> String {
     let seconds = now_unix_seconds();
     let mut hasher = DefaultHasher::new();
@@ -814,6 +956,8 @@ fn current_local_timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::Path;
 
     #[test]
     fn parses_clash_yaml_profile() {
@@ -849,5 +993,94 @@ rules:
         assert_eq!(parsed.rule_count, 0);
         assert_eq!(parsed.proxy_groups[0].proxies.len(), 2);
         assert!(parsed.rules.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn e2e_enable_disable_system_proxy_with_kernel_runtime() {
+        let mut bin_dir = std::env::temp_dir();
+        bin_dir.push(format!("linkpad-core-e2e-{}", now_unix_seconds()));
+        if bin_dir.exists() {
+            fs::remove_dir_all(&bin_dir).expect("cleanup old temp bin dir");
+        }
+        fs::create_dir_all(&bin_dir).expect("create temp bin dir");
+
+        write_script(&bin_dir.join("mihomo"), "#!/bin/sh\nsleep 30\n", 0o755);
+        write_script(
+            &bin_dir.join("networksetup"),
+            "#!/bin/sh\ncase \"$1\" in\n  -listallnetworkservices)\n    echo \"An asterisk (*) denotes that a network service is disabled.\"\n    echo \"Wi-Fi\"\n    ;;\n  -getwebproxy|-getsecurewebproxy|-getsocksfirewallproxy)\n    echo \"Enabled: No\"\n    echo \"Server:\"\n    echo \"Port: 0\"\n    ;;\n  -setwebproxy|-setsecurewebproxy|-setsocksfirewallproxy|-setwebproxystate|-setsecurewebproxystate|-setsocksfirewallproxystate)\n    exit 0\n    ;;\n  *)\n    echo \"unsupported: $1\" >&2\n    exit 1\n    ;;\nesac\n",
+            0o755,
+        );
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let _path_guard = PathGuard(old_path.clone());
+        let new_path = format!("{}:{old_path}", bin_dir.display());
+        // SAFETY: tests update process env to route command lookup to temp stubs.
+        unsafe { std::env::set_var("PATH", new_path) };
+
+        let core = Core::new();
+        let raw_yaml = r#"
+mixed-port: 7890
+mode: rule
+allow-lan: false
+proxies:
+  - { name: "node-1", type: ss, server: "example.com", port: 443, cipher: aes-128-gcm, password: "pwd" }
+proxy-groups:
+  - { name: "auto", type: select, proxies: ["node-1"] }
+rules:
+  - MATCH,auto
+"#;
+        let parsed = parse_profile_yaml("https://example.com/sub.yaml", raw_yaml)
+            .expect("yaml should parse for e2e test");
+
+        core.replace_profiles(vec![Profile {
+            id: "p-e2e".to_string(),
+            name: "e2e".to_string(),
+            source_url: "https://example.com/sub.yaml".to_string(),
+            updated_at: "2026-02-08 00:00:00".to_string(),
+            node_count: parsed.node_count,
+            group_count: parsed.group_count,
+            rule_count: parsed.rule_count,
+            active: true,
+            proxy_groups: parsed.proxy_groups,
+            proxy_nodes: parsed.proxy_nodes,
+            rules: parsed.rules,
+            raw_yaml: raw_yaml.to_string(),
+        }]);
+
+        core.enable_system_proxy()
+            .expect("enable system proxy should succeed with stub binaries");
+        assert!(core.is_running());
+        assert!(core.is_system_proxy_enabled());
+
+        core.disable_system_proxy()
+            .expect("disable system proxy should succeed with stub binaries");
+        assert!(!core.is_running());
+        assert!(!core.is_system_proxy_enabled());
+
+        let _ = fs::remove_dir_all(&bin_dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn write_script(path: &Path, content: &str, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, content).expect("write script");
+        let mut permissions = fs::metadata(path)
+            .expect("read script metadata")
+            .permissions();
+        permissions.set_mode(mode);
+        fs::set_permissions(path, permissions).expect("set script mode");
+    }
+
+    #[cfg(target_os = "macos")]
+    struct PathGuard(String);
+
+    #[cfg(target_os = "macos")]
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            // SAFETY: restoring PATH in test teardown.
+            unsafe { std::env::set_var("PATH", &self.0) };
+        }
     }
 }
