@@ -591,6 +591,18 @@ live_design! {
                                     selected_item: 2
                                 }
                             }
+
+                            <View> {
+                                width: Fill,
+                                height: Fit,
+                                flow: Right,
+                                align: {y: 0.5},
+                                spacing: (SPACE_3),
+
+                                close_to_tray_label = <Label> {text: "Run in background on close", draw_text: {text_style: <APP_FONT_BODY>{}, color: (TEXT_PRIMARY)}}
+                                <View> {width: Fill, height: Fit}
+                                close_to_tray_switch = <MpSwitch> {}
+                            }
                         }
                     }
 

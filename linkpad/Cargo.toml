@@ -8,7 +8,7 @@ version     = { workspace = true }
 [dependencies]
 linkpad-core       = { workspace = true }
 makepad-components = { workspace = true, features = ["Button", "Layout", "Card", "Dropdown", "Input", "Switch"] }
-makepad-shell      = { workspace = true }
+makepad-shell      = { workspace = true, features = ["tray", "app-menu", "menu-model", "platforms"] }
 dirs               = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }

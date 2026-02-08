@@ -1,19 +1,31 @@
 use crate::i18n;
-use crate::profile_store;
-use crate::settings_store;
 use crate::state::{
     AppState, Language, Page, ProfileSummary, ProxyGroupSummary, ProxyNodeSummary, RuleFilter,
     ThemePreference,
 };
+use crate::store::profile_store;
+use crate::store::settings_store;
 use linkpad_core::{Core as LinkpadCore, KernelUpgradeInfo, ProxyMode};
 use makepad_components::button::MpButtonWidgetRefExt;
+use makepad_components::makepad_widgets::makepad_platform::CxOsOp;
 use makepad_components::makepad_widgets::*;
 use makepad_components::switch::MpSwitchWidgetRefExt;
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Once;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::thread;
 use tracing::{error, info, warn};
+
+#[path = "views/profiles.rs"]
+mod profiles;
+#[path = "views/proxy_groups.rs"]
+mod proxy_groups;
+#[path = "views/rules.rs"]
+mod rules;
+#[path = "views/settings.rs"]
+mod settings;
+#[path = "tray.rs"]
+mod tray;
 
 live_design! {
     use link::widgets::*;
@@ -129,6 +141,12 @@ pub struct App {
     core_task_timer: Timer,
     #[rust]
     core_task_kind: Option<CoreTaskKind>,
+    #[rust]
+    tray: Option<makepad_components::shell::TrayHandle>,
+    #[rust]
+    app_menu_installed: bool,
+    #[rust]
+    window_id: Option<WindowId>,
 }
 
 #[derive(Clone, Copy)]
@@ -241,6 +259,26 @@ impl LiveRegister for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::WindowGeomChange(ev) = event {
+            self.window_id = Some(ev.window_id);
+        }
+        if let Event::WindowGotFocus(window_id) = event {
+            self.window_id = Some(*window_id);
+        }
+        if let Event::WindowCloseRequested(ev) = event {
+            self.window_id = Some(ev.window_id);
+            if self.state.close_to_tray_enabled {
+                ev.accept_close.set(false);
+                #[cfg(target_os = "windows")]
+                {
+                    cx.push_unique_platform_op(CxOsOp::MinimizeWindow(ev.window_id));
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    cx.push_unique_platform_op(CxOsOp::HideWindow(ev.window_id));
+                }
+            }
+        }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
         self.try_lazy_load_rules_on_scroll(cx, event);
@@ -355,8 +393,10 @@ impl App {
     fn init_logging() {
         static LOGGING_INIT: Once = Once::new();
         LOGGING_INIT.call_once(|| {
-            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("linkpad=info,linkpad_core=info,warn"));
+            let env_filter =
+                tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new("linkpad=info,linkpad_core=info,warn")
+                });
             if let Err(init_error) = tracing_subscriber::fmt()
                 .with_env_filter(env_filter)
                 .with_target(true)
@@ -517,6 +557,7 @@ impl App {
             .label(ids!(sidebar.brand))
             .set_text(cx, strings.app_name);
 
+        self.sync_tray_menu(strings);
         self.update_menu_buttons(cx);
         self.ui.redraw(cx);
     }
@@ -537,6 +578,9 @@ impl App {
         self.ui
             .label(ids!(dashboard.theme_label))
             .set_text(cx, strings.theme_label);
+        self.ui
+            .label(ids!(dashboard.close_to_tray_label))
+            .set_text(cx, strings.close_to_tray_label);
         self.ui
             .label(ids!(dashboard.system_proxy_label))
             .set_text(cx, strings.system_proxy_label);
@@ -587,6 +631,9 @@ impl App {
         self.ui
             .mp_switch(ids!(dashboard.system_proxy_switch))
             .set_on(cx, self.state.system_proxy_enabled);
+        self.ui
+            .mp_switch(ids!(dashboard.close_to_tray_switch))
+            .set_on(cx, self.state.close_to_tray_enabled);
         self.ui
             .mp_switch(ids!(dashboard.auto_launch_switch))
             .set_on(cx, self.state.auto_launch_enabled);
@@ -988,11 +1035,13 @@ impl App {
             .as_deref()
             .map(|name| name == group.name.as_str())
             .unwrap_or(false);
-        self.ui.mp_button(row_ids.test_btn).set_text(if is_latency_testing {
-            strings.proxy_groups_testing
-        } else {
-            strings.proxy_groups_test_latency
-        });
+        self.ui
+            .mp_button(row_ids.test_btn)
+            .set_text(if is_latency_testing {
+                strings.proxy_groups_testing
+            } else {
+                strings.proxy_groups_test_latency
+            });
         self.ui
             .mp_button(row_ids.locate_btn)
             .set_text(strings.proxy_groups_locate);
@@ -1105,74 +1154,6 @@ impl App {
         }
     }
 
-    fn filtered_rules(&self) -> Vec<String> {
-        let query = self.state.rules_query.trim().to_ascii_lowercase();
-        self.state
-            .rules
-            .iter()
-            .filter(|rule| Self::rule_matches_filter(rule, self.state.rules_filter))
-            .filter(|rule| query.is_empty() || rule.to_ascii_lowercase().contains(&query))
-            .cloned()
-            .collect()
-    }
-
-    fn should_paginate_rules(&self) -> bool {
-        self.state.rules_filter == RuleFilter::All
-            && self.state.rules_query.trim().is_empty()
-    }
-
-    fn reset_rules_pagination(&mut self) {
-        self.state.rules_visible_count = Self::RULES_PAGE_SIZE;
-    }
-
-    fn ensure_rules_visible_count(&mut self, filtered_count: usize) {
-        if !self.should_paginate_rules() {
-            self.state.rules_visible_count = filtered_count;
-            return;
-        }
-        if self.state.rules_visible_count == 0 {
-            self.state.rules_visible_count = Self::RULES_PAGE_SIZE.min(filtered_count);
-        } else if self.state.rules_visible_count > filtered_count {
-            self.state.rules_visible_count = filtered_count;
-        }
-    }
-
-    fn try_lazy_load_rules_on_scroll(&mut self, cx: &mut Cx, event: &Event) {
-        if self.state.active_page != Page::Rules || !self.should_paginate_rules() {
-            return;
-        }
-
-        let Event::Scroll(_) = event else {
-            return;
-        };
-
-        let area = self.ui.view(ids!(dashboard.content_body)).area();
-        if area.is_empty() {
-            return;
-        }
-        if !matches!(event.hits(cx, area), Hit::FingerScroll(_)) {
-            return;
-        }
-
-        let filtered_count = self.filtered_rules().len();
-        if filtered_count == 0 || self.state.rules_visible_count >= filtered_count {
-            return;
-        }
-
-        self.state.rules_visible_count =
-            (self.state.rules_visible_count + Self::RULES_PAGE_SIZE).min(filtered_count);
-        self.refresh_ui(cx);
-    }
-
-    fn rule_matches_filter(rule: &str, filter: RuleFilter) -> bool {
-        match filter {
-            RuleFilter::All => true,
-            RuleFilter::Domain => rule.starts_with("DOMAIN"),
-            RuleFilter::IpCidr => rule.starts_with("IP-CIDR"),
-            RuleFilter::ProcessName => rule.starts_with("PROCESS-NAME"),
-        }
-    }
-
     fn truncate_text(input: &str, max_chars: usize) -> String {
         let mut chars = input.chars();
         let truncated: String = chars.by_ref().take(max_chars).collect();
@@ -1210,8 +1191,12 @@ impl App {
                 udp: node.udp,
             })
             .collect();
-        self.proxy_latency_ms
-            .retain(|proxy_name, _| self.state.proxy_nodes.iter().any(|node| node.name == *proxy_name));
+        self.proxy_latency_ms.retain(|proxy_name, _| {
+            self.state
+                .proxy_nodes
+                .iter()
+                .any(|node| node.name == *proxy_name)
+        });
 
         self.state.proxy_groups = self
             .core
@@ -1306,384 +1291,6 @@ impl App {
         self.persist_settings();
     }
 
-    fn apply_saved_proxy_group_selections(&mut self) {
-        for group in &self.state.proxy_groups {
-            let Some(saved_proxy_name) = self.saved_proxy_group_selections.get(&group.name) else {
-                continue;
-            };
-            let Some(index) = group.proxies.iter().position(|name| name == saved_proxy_name) else {
-                continue;
-            };
-            self.state
-                .proxy_group_selected
-                .insert(group.name.clone(), index);
-        }
-    }
-
-    fn snapshot_proxy_group_selections(&mut self) {
-        for group in &self.state.proxy_groups {
-            let Some(selected_index) = self.state.proxy_group_selected.get(&group.name).copied() else {
-                continue;
-            };
-            let Some(selected_proxy_name) = group.proxies.get(selected_index) else {
-                continue;
-            };
-            self.saved_proxy_group_selections
-                .insert(group.name.clone(), selected_proxy_name.clone());
-        }
-    }
-
-    fn apply_saved_proxy_group_selections_to_core(&mut self) {
-        if self.state.proxy_groups.is_empty() {
-            return;
-        }
-        for group in &self.state.proxy_groups {
-            let Some(selected_index) = self.state.proxy_group_selected.get(&group.name).copied() else {
-                continue;
-            };
-            let Some(selected_proxy_name) = group.proxies.get(selected_index) else {
-                continue;
-            };
-            let _ = self.core.select_proxy(&group.name, selected_proxy_name);
-        }
-    }
-
-    fn select_active_proxy_group(&mut self, cx: &mut Cx, row_index: usize) {
-        let Some(group_name) = self
-            .state
-            .proxy_groups
-            .get(row_index)
-            .map(|group| group.name.clone())
-        else {
-            return;
-        };
-        if self.state.active_proxy_group.as_deref() == Some(group_name.as_str()) {
-            self.state.active_proxy_group = None;
-        } else {
-            self.state.active_proxy_group = Some(group_name);
-        }
-        self.refresh_ui(cx);
-    }
-
-    fn select_proxy_item_for_group(&mut self, cx: &mut Cx, row_index: usize, item_index: usize) {
-        let Some((group_name, proxy_name, proxy_len)) = self
-            .state
-            .proxy_groups
-            .get(row_index)
-            .and_then(|group| {
-                group
-                    .proxies
-                    .get(item_index)
-                    .cloned()
-                    .map(|proxy_name| (group.name.clone(), proxy_name, group.proxies.len()))
-            })
-        else {
-            return;
-        };
-        if item_index >= proxy_len {
-            return;
-        }
-        info!("proxy selection requested: group={group_name}, index={item_index}");
-        match self.core.select_proxy(&group_name, &proxy_name) {
-            Ok(()) => {
-                self.state
-                    .proxy_group_selected
-                    .insert(group_name, item_index);
-                self.snapshot_proxy_group_selections();
-                self.persist_settings();
-                info!("proxy selection applied: proxy={proxy_name}");
-            }
-            Err(error) => {
-                let strings = i18n::strings(self.state.language);
-                error!("proxy selection failed: {error}");
-                self.push_notification(
-                    cx,
-                    NotificationLevel::Error,
-                    format!("{}: {error}", strings.proxy_groups_select_failed_prefix),
-                );
-            }
-        }
-        self.refresh_ui(cx);
-    }
-
-    fn start_latency_test_for_group(&mut self, cx: &mut Cx, row_index: usize) {
-        if self.latency_rx.is_some() {
-            return;
-        }
-
-        let Some(group) = self.state.proxy_groups.get(row_index).cloned() else {
-            return;
-        };
-        if group.proxies.is_empty() {
-            let strings = i18n::strings(self.state.language);
-            self.push_notification(
-                cx,
-                NotificationLevel::Info,
-                strings.proxy_groups_proxy_empty.to_string(),
-            );
-            return;
-        }
-
-        for proxy_name in &group.proxies {
-            self.proxy_latency_ms
-                .insert(proxy_name.clone(), LatencyStatus::NotTested);
-        }
-
-        let core = self.core.clone();
-        let group_name_for_ui = group.name.clone();
-        let group_name_for_task = group.name;
-        let proxies = group.proxies;
-        let (tx, rx) = std::sync::mpsc::channel::<LatencyTaskEvent>();
-        thread::spawn(move || {
-            let mut success_count = 0usize;
-            let mut first_error: Option<String> = None;
-            let total_count = proxies.len();
-
-            for proxy_name in proxies {
-                let delay = match core.probe_proxy_delay(&proxy_name) {
-                    Ok(delay) => {
-                        if delay.is_some() {
-                            success_count += 1;
-                        }
-                        delay
-                    }
-                    Err(error) => {
-                        if first_error.is_none() {
-                            first_error = Some(error.to_string());
-                        }
-                        None
-                    }
-                };
-
-                let _ = tx.send(LatencyTaskEvent::Progress {
-                    group_name: group_name_for_task.clone(),
-                    proxy_name,
-                    delay,
-                });
-            }
-
-            if success_count == 0 {
-                if let Some(error) = first_error {
-                    let _ = tx.send(LatencyTaskEvent::Failed {
-                        group_name: group_name_for_task,
-                        error,
-                    });
-                    return;
-                }
-            }
-
-            let _ = tx.send(LatencyTaskEvent::Finished {
-                group_name: group_name_for_task,
-                success_count,
-                total_count,
-            });
-        });
-
-        if !self.latency_poll_timer.is_empty() {
-            cx.stop_timer(self.latency_poll_timer);
-        }
-        self.latency_rx = Some(rx);
-        self.latency_testing_group = Some(group_name_for_ui);
-        self.latency_poll_timer = cx.start_interval(0.1);
-        self.refresh_ui(cx);
-    }
-
-    fn stop_latency_polling(&mut self, cx: &mut Cx) {
-        if !self.latency_poll_timer.is_empty() {
-            cx.stop_timer(self.latency_poll_timer);
-            self.latency_poll_timer = Timer::default();
-        }
-        self.latency_rx = None;
-        self.latency_testing_group = None;
-    }
-
-    fn poll_latency_test(&mut self, cx: &mut Cx) {
-        let mut events = Vec::new();
-        let disconnected = {
-            let Some(latency_rx) = self.latency_rx.as_ref() else {
-                return;
-            };
-
-            loop {
-                match latency_rx.try_recv() {
-                    Ok(event) => events.push(event),
-                    Err(TryRecvError::Empty) => break false,
-                    Err(TryRecvError::Disconnected) => break true,
-                }
-            }
-        };
-
-        if events.is_empty() && !disconnected {
-            return;
-        }
-
-        let strings = i18n::strings(self.state.language);
-        let mut should_stop = false;
-
-        for event in events {
-            match event {
-                LatencyTaskEvent::Progress {
-                    group_name,
-                    proxy_name,
-                    delay,
-                } => {
-                    if self
-                        .latency_testing_group
-                        .as_deref()
-                        .map(|active| active == group_name.as_str())
-                        .unwrap_or(false)
-                    {
-                        let status = delay
-                            .map(LatencyStatus::Value)
-                            .unwrap_or(LatencyStatus::Timeout);
-                        self.proxy_latency_ms.insert(proxy_name, status);
-                    }
-                }
-                LatencyTaskEvent::Finished {
-                    group_name,
-                    success_count,
-                    total_count,
-                } => {
-                    should_stop = true;
-                    self.push_notification(
-                        cx,
-                        NotificationLevel::Success,
-                        format!(
-                            "{}: {} ({}/{})",
-                            strings.proxy_groups_latency_test_success_prefix,
-                            group_name,
-                            success_count,
-                            total_count
-                        ),
-                    );
-                }
-                LatencyTaskEvent::Failed { group_name, error } => {
-                    should_stop = true;
-                    self.push_notification(
-                        cx,
-                        NotificationLevel::Error,
-                        format!(
-                            "{}: {} ({error})",
-                            strings.proxy_groups_latency_test_failed_prefix, group_name
-                        ),
-                    );
-                }
-            }
-        }
-
-        if disconnected && !should_stop {
-            should_stop = true;
-            self.push_notification(
-                cx,
-                NotificationLevel::Error,
-                format!(
-                    "{}: latency worker disconnected",
-                    strings.proxy_groups_latency_test_failed_prefix
-                ),
-            );
-        }
-
-        if should_stop {
-            self.stop_latency_polling(cx);
-        }
-
-        self.refresh_ui(cx);
-    }
-
-    fn locate_selected_proxy_for_group(&mut self, cx: &mut Cx, row_index: usize) {
-        let Some(group) = self.state.proxy_groups.get(row_index).cloned() else {
-            return;
-        };
-        let Some(proxy_count) = (!group.proxies.is_empty()).then_some(group.proxies.len()) else {
-            let strings = i18n::strings(self.state.language);
-            self.push_notification(
-                cx,
-                NotificationLevel::Info,
-                strings.proxy_groups_locate_failed.to_string(),
-            );
-            return;
-        };
-
-        let mut selected_index = self
-            .state
-            .proxy_group_selected
-            .get(&group.name)
-            .copied()
-            .unwrap_or(0);
-        if selected_index >= proxy_count {
-            selected_index = 0;
-        }
-
-        self.state.active_proxy_group = Some(group.name);
-        self.pending_locate = Some((row_index, selected_index));
-        self.locate_retry_count = 0;
-        if !self.locate_timer.is_empty() {
-            cx.stop_timer(self.locate_timer);
-        }
-        self.locate_timer = cx.start_timeout(0.04);
-        self.refresh_ui(cx);
-    }
-
-    fn perform_pending_locate(&mut self, cx: &mut Cx) {
-        let Some((row_index, item_index)) = self.pending_locate else {
-            return;
-        };
-
-        let item = Self::proxy_item_row_ids(row_index, item_index);
-        let content_area = self.ui.view(ids!(dashboard.content_body)).area();
-        let target_area = self.ui.view(&item.row).area();
-
-        if !content_area.is_empty() && !target_area.is_empty() {
-            let content_rect = content_area.rect(cx);
-            let target_rect = target_area.rect(cx);
-            let target_y = (target_rect.pos.y - content_rect.pos.y - 24.0).max(0.0);
-            self.ui
-                .view(ids!(dashboard.content_body))
-                .set_scroll_pos(cx, dvec2(0.0, target_y));
-            self.pending_locate = None;
-            self.locate_retry_count = 0;
-            if !self.locate_timer.is_empty() {
-                cx.stop_timer(self.locate_timer);
-            }
-            self.locate_timer = Timer::default();
-            self.refresh_ui(cx);
-            return;
-        }
-
-        if self.locate_retry_count < 6 {
-            self.locate_retry_count += 1;
-            if !self.locate_timer.is_empty() {
-                cx.stop_timer(self.locate_timer);
-            }
-            self.locate_timer = cx.start_timeout(0.05);
-            return;
-        }
-
-        let fallback_y = Self::estimate_proxy_item_scroll_y(row_index, item_index);
-        self.ui
-            .view(ids!(dashboard.content_body))
-            .set_scroll_pos(cx, dvec2(0.0, fallback_y));
-        self.pending_locate = None;
-        self.locate_retry_count = 0;
-        if !self.locate_timer.is_empty() {
-            cx.stop_timer(self.locate_timer);
-        }
-        self.locate_timer = Timer::default();
-        self.refresh_ui(cx);
-    }
-
-    fn estimate_proxy_item_scroll_y(row_index: usize, item_index: usize) -> f64 {
-        let card_top_padding = 220.0;
-        let collapsed_group_height = 90.0;
-        let group_header_height = 72.0;
-        let option_row_height = 96.0;
-        let option_row_index = item_index / 2;
-        card_top_padding
-            + (row_index as f64 * collapsed_group_height)
-            + group_header_height
-            + (option_row_index as f64 * option_row_height)
-    }
-
     fn set_proxy_mode(&mut self, cx: &mut Cx, mode: ProxyMode) {
         if self.state.proxy_mode == mode {
             return;
@@ -1766,108 +1373,6 @@ impl App {
         self.show_next_notification(cx);
     }
 
-    fn set_import_status_ready(&mut self) {
-        self.state.import_status.message = i18n::strings(self.state.language)
-            .profiles_import_ready
-            .to_string();
-        self.state.import_status.is_error = false;
-    }
-
-    fn set_import_status_error(&mut self, message: String) {
-        self.state.import_status.message = message;
-        self.state.import_status.is_error = true;
-    }
-
-    fn stop_import_polling(&mut self, cx: &mut Cx) {
-        if !self.import_poll_timer.is_empty() {
-            cx.stop_timer(self.import_poll_timer);
-            self.import_poll_timer = Timer::default();
-        }
-        self.import_rx = None;
-    }
-
-    fn import_profile_from_input(&mut self, cx: &mut Cx) {
-        if self.import_rx.is_some() {
-            warn!("skip profile import: previous import task still running");
-            return;
-        }
-
-        let strings = i18n::strings(self.state.language);
-        let url = self.state.profile_url_input.trim().to_string();
-        if url.is_empty() {
-            warn!("skip profile import: url is empty");
-            let message = strings.profiles_import_error.to_string();
-            self.set_import_status_error(message.clone());
-            self.push_notification(cx, NotificationLevel::Error, message);
-            self.refresh_ui(cx);
-            return;
-        }
-        info!("profile import requested");
-        if !self.import_poll_timer.is_empty() {
-            cx.stop_timer(self.import_poll_timer);
-            self.import_poll_timer = Timer::default();
-        }
-
-        self.state.import_status.message = strings.profiles_import_loading.to_string();
-        self.state.import_status.is_error = false;
-
-        let core = self.core.clone();
-        let (tx, rx) = std::sync::mpsc::channel::<ImportTaskResult>();
-        thread::spawn(move || {
-            let result = core
-                .import_profile_url(&url, true)
-                .map(|_| ())
-                .map_err(|error| error.to_string());
-            let _ = tx.send(result);
-        });
-
-        self.import_rx = Some(rx);
-        self.import_poll_timer = cx.start_interval(0.1);
-        self.refresh_ui(cx);
-    }
-
-    fn poll_profile_import(&mut self, cx: &mut Cx) {
-        let Some(import_rx) = self.import_rx.as_ref() else {
-            return;
-        };
-
-        let result = match import_rx.try_recv() {
-            Ok(result) => Some(result),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => Some(Err("import worker disconnected".to_string())),
-        };
-
-        let Some(result) = result else {
-            return;
-        };
-
-        self.stop_import_polling(cx);
-        match result {
-            Ok(()) => {
-                let strings = i18n::strings(self.state.language);
-                self.persist_profiles();
-                self.sync_from_core();
-                self.state.profile_url_input.clear();
-                self.state.import_status.message = strings.profiles_import_success.to_string();
-                self.state.import_status.is_error = false;
-                info!("profile import succeeded");
-                self.push_notification(
-                    cx,
-                    NotificationLevel::Success,
-                    strings.profiles_import_success.to_string(),
-                );
-            }
-            Err(error) => {
-                let strings = i18n::strings(self.state.language);
-                let message = format!("{} ({error})", strings.profiles_import_error);
-                self.set_import_status_error(message.clone());
-                error!("profile import failed: {error}");
-                self.push_notification(cx, NotificationLevel::Error, message);
-            }
-        }
-        self.refresh_ui(cx);
-    }
-
     fn stop_core_task_polling(&mut self, cx: &mut Cx) {
         if !self.core_task_timer.is_empty() {
             cx.stop_timer(self.core_task_timer);
@@ -1940,9 +1445,7 @@ impl App {
         let result = match core_task_rx.try_recv() {
             Ok(result) => Some(result),
             Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => {
-                Some(Err("core worker disconnected".to_string()))
-            }
+            Err(TryRecvError::Disconnected) => Some(Err("core worker disconnected".to_string())),
         };
         let Some(result) = result else {
             return;
@@ -1980,80 +1483,7 @@ impl App {
                     Some(CoreTaskKind::Restarting) => strings.clash_core_restart_failed_prefix,
                     None => strings.clash_core_upgrade_failed_prefix,
                 };
-                self.push_notification(
-                    cx,
-                    NotificationLevel::Error,
-                    format!("{prefix}: {error}"),
-                );
-            }
-        }
-        self.refresh_ui(cx);
-    }
-
-    fn activate_profile_row(&mut self, cx: &mut Cx, row_index: usize) {
-        let Some(profile_id) = self
-            .state
-            .profiles
-            .get(row_index)
-            .map(|profile| profile.id.clone())
-        else {
-            return;
-        };
-
-        match self.core.set_active_profile(&profile_id) {
-            Ok(()) => {
-                self.persist_profiles();
-                self.sync_from_core();
-                self.set_import_status_ready();
-            }
-            Err(error) => {
-                self.set_import_status_error(format!("{error}"));
-            }
-        }
-        self.refresh_ui(cx);
-    }
-
-    fn refresh_profile_row(&mut self, cx: &mut Cx, row_index: usize) {
-        let Some(profile_id) = self
-            .state
-            .profiles
-            .get(row_index)
-            .map(|profile| profile.id.clone())
-        else {
-            return;
-        };
-
-        match self.core.refresh_profile(&profile_id) {
-            Ok(_) => {
-                self.persist_profiles();
-                self.sync_from_core();
-                self.set_import_status_ready();
-            }
-            Err(error) => {
-                self.set_import_status_error(format!("{error}"));
-            }
-        }
-        self.refresh_ui(cx);
-    }
-
-    fn delete_profile_row(&mut self, cx: &mut Cx, row_index: usize) {
-        let Some(profile_id) = self
-            .state
-            .profiles
-            .get(row_index)
-            .map(|profile| profile.id.clone())
-        else {
-            return;
-        };
-
-        match self.core.delete_profile(&profile_id) {
-            Ok(()) => {
-                self.persist_profiles();
-                self.sync_from_core();
-                self.set_import_status_ready();
-            }
-            Err(error) => {
-                self.set_import_status_error(format!("{error}"));
+                self.push_notification(cx, NotificationLevel::Error, format!("{prefix}: {error}"));
             }
         }
         self.refresh_ui(cx);
@@ -2070,64 +1500,6 @@ impl App {
             cx.link(live_id!(theme_colors), live_id!(theme_colors_light));
         }
         cx.redraw_all();
-    }
-
-    fn load_persisted_settings(&mut self) {
-        if let Some(loaded) = settings_store::load() {
-            self.state.language = loaded.language;
-            self.state.theme = loaded.theme;
-            self.state.system_proxy_enabled = loaded.system_proxy_enabled;
-            self.state.auto_launch_enabled = loaded.auto_launch_enabled;
-            self.state.silent_start_enabled = loaded.silent_start_enabled;
-            self.state.clash_mixed_port = loaded.clash_mixed_port;
-            self.state.clash_port_input = loaded.clash_mixed_port.to_string();
-            self.saved_proxy_group_selections = loaded.proxy_group_selections;
-            info!("loaded persisted settings");
-        } else {
-            info!("no persisted settings found, using defaults");
-        }
-    }
-
-    fn sync_startup_state_from_core(&mut self) {
-        if let Ok(status) = self.core.startup_status() {
-            self.state.auto_launch_enabled = status.auto_launch;
-            if status.auto_launch {
-                self.state.silent_start_enabled = status.silent_start;
-            }
-        }
-    }
-
-    fn persist_settings(&self) {
-        let _ = settings_store::save(
-            self.state.language,
-            self.state.theme,
-            self.state.system_proxy_enabled,
-            self.state.auto_launch_enabled,
-            self.state.silent_start_enabled,
-            self.state.clash_mixed_port,
-            &self.saved_proxy_group_selections,
-        );
-    }
-
-    fn apply_clash_config_to_core(&mut self) {
-        let mut config = self.core.config();
-        config.mixed_port = self.state.clash_mixed_port;
-        let _ = self.core.update_config(config);
-    }
-
-    fn load_persisted_profiles(&mut self) {
-        let profiles = profile_store::load();
-        if profiles.is_empty() {
-            info!("no persisted profiles found");
-            return;
-        }
-        info!("loaded persisted profiles: count={}", profiles.len());
-        self.core.replace_profiles(profiles);
-    }
-
-    fn persist_profiles(&self) {
-        let profiles = self.core.profiles();
-        let _ = profile_store::save(&profiles);
     }
 
     fn apply_dropdown_theme(&mut self, cx: &mut Cx, id: &[LiveId; 2], palette: ThemePalette) {
@@ -2304,26 +1676,24 @@ impl App {
             );
         self.apply_dropdown_theme(cx, ids!(dashboard.language_dropdown), palette);
         self.apply_dropdown_theme(cx, ids!(dashboard.theme_dropdown), palette);
-        self.ui
-            .widget(ids!(dashboard.clash_port_input))
-            .apply_over(
-                cx,
-                live! {
-                    draw_bg: {
-                        bg_color: (palette.panel_bg),
-                        bg_color_hover: (palette.panel_bg),
-                        bg_color_focus: (palette.panel_bg),
-                        border_color: (palette.border_color),
-                        border_color_hover: (palette.border_color),
-                        border_color_focus: (palette.menu_active_bg)
-                    }
-                    draw_text: {
-                        color: (palette.text_primary),
-                        color_empty: (palette.text_muted)
-                    }
-                    draw_cursor: { color: (palette.menu_active_bg) }
-                },
-            );
+        self.ui.widget(ids!(dashboard.clash_port_input)).apply_over(
+            cx,
+            live! {
+                draw_bg: {
+                    bg_color: (palette.panel_bg),
+                    bg_color_hover: (palette.panel_bg),
+                    bg_color_focus: (palette.panel_bg),
+                    border_color: (palette.border_color),
+                    border_color_hover: (palette.border_color),
+                    border_color_focus: (palette.menu_active_bg)
+                }
+                draw_text: {
+                    color: (palette.text_primary),
+                    color_empty: (palette.text_muted)
+                }
+                draw_cursor: { color: (palette.menu_active_bg) }
+            },
+        );
         self.ui
             .widget(ids!(dashboard.rules_search_input))
             .apply_over(
@@ -2395,6 +1765,14 @@ impl App {
             },
         );
         self.ui
+            .label(ids!(dashboard.close_to_tray_label))
+            .apply_over(
+                cx,
+                live! {
+                    draw_text: { color: (palette.text_primary) }
+                },
+            );
+        self.ui
             .label(ids!(dashboard.system_proxy_label))
             .apply_over(
                 cx,
@@ -2416,14 +1794,12 @@ impl App {
                     draw_text: { color: (palette.text_primary) }
                 },
             );
-        self.ui
-            .label(ids!(dashboard.clash_port_label))
-            .apply_over(
-                cx,
-                live! {
-                    draw_text: { color: (palette.text_primary) }
-                },
-            );
+        self.ui.label(ids!(dashboard.clash_port_label)).apply_over(
+            cx,
+            live! {
+                draw_text: { color: (palette.text_primary) }
+            },
+        );
         self.ui
             .label(ids!(dashboard.clash_core_version_label))
             .apply_over(
@@ -2827,15 +2203,17 @@ impl MatchEvent for App {
         Self::init_logging();
         info!("linkpad startup begin");
         self.load_persisted_settings();
-        let _ = self
-            .core
-            .configure_startup(self.state.auto_launch_enabled, self.state.silent_start_enabled);
+        let _ = self.core.configure_startup(
+            self.state.auto_launch_enabled,
+            self.state.silent_start_enabled,
+        );
         self.sync_startup_state_from_core();
         self.apply_clash_config_to_core();
         self.load_persisted_profiles();
         self.sync_from_core();
         self.persist_profiles();
         self.set_import_status_ready();
+        self.install_shell_integrations();
         info!(
             "linkpad startup complete: profiles={}, groups={}, rules={}",
             self.state.profiles.len(),
@@ -2865,6 +2243,15 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        for action in actions {
+            if let Some(shell_action) = action.downcast_ref::<tray::ShellCommandAction>() {
+                self.apply_shell_command(cx, shell_action.0);
+            }
+            if action.downcast_ref::<tray::TrayActivateAction>().is_some() {
+                self.handle_tray_activate(cx);
+            }
+        }
+
         if self
             .ui
             .mp_button(ids!(sidebar.menu_profiles))
@@ -2889,344 +2276,10 @@ impl MatchEvent for App {
         {
             self.switch_page(cx, Page::Settings);
         }
-        if let Some(value) = self
-            .ui
-            .text_input(ids!(dashboard.profile_url_input))
-            .changed(actions)
-        {
-            self.state.profile_url_input = value;
-        }
-        if let Some(value) = self
-            .ui
-            .text_input(ids!(dashboard.clash_port_input))
-            .changed(actions)
-        {
-            self.state.clash_port_input = value;
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.profile_import_btn))
-            .clicked(actions)
-        {
-            self.import_profile_from_input(cx);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.profile_row_1_activate_btn))
-            .clicked(actions)
-        {
-            self.activate_profile_row(cx, 0);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.profile_row_2_activate_btn))
-            .clicked(actions)
-        {
-            self.activate_profile_row(cx, 1);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.profile_row_3_activate_btn))
-            .clicked(actions)
-        {
-            self.activate_profile_row(cx, 2);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.profile_row_1_refresh_btn))
-            .clicked(actions)
-        {
-            self.refresh_profile_row(cx, 0);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.profile_row_2_refresh_btn))
-            .clicked(actions)
-        {
-            self.refresh_profile_row(cx, 1);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.profile_row_3_refresh_btn))
-            .clicked(actions)
-        {
-            self.refresh_profile_row(cx, 2);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.profile_row_1_delete_btn))
-            .clicked(actions)
-        {
-            self.delete_profile_row(cx, 0);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.profile_row_2_delete_btn))
-            .clicked(actions)
-        {
-            self.delete_profile_row(cx, 1);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.profile_row_3_delete_btn))
-            .clicked(actions)
-        {
-            self.delete_profile_row(cx, 2);
-        }
-        for (index, row_ids) in Self::proxy_group_rows().iter().enumerate() {
-            if self.ui.mp_button(row_ids.open_btn).clicked(actions) {
-                self.select_active_proxy_group(cx, index);
-            }
-            if self.ui.mp_button(row_ids.test_btn).clicked(actions) {
-                self.start_latency_test_for_group(cx, index);
-            }
-            if self.ui.mp_button(row_ids.locate_btn).clicked(actions) {
-                self.locate_selected_proxy_for_group(cx, index);
-            }
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.proxy_mode_rule_btn))
-            .clicked(actions)
-        {
-            self.set_proxy_mode(cx, ProxyMode::Rule);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.proxy_mode_global_btn))
-            .clicked(actions)
-        {
-            self.set_proxy_mode(cx, ProxyMode::Global);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.proxy_mode_direct_btn))
-            .clicked(actions)
-        {
-            self.set_proxy_mode(cx, ProxyMode::Direct);
-        }
-        for (group_index, _) in Self::proxy_group_rows().iter().enumerate() {
-            let item_count = self
-                .state
-                .proxy_groups
-                .get(group_index)
-                .map(|group| group.proxies.len().min(Self::MAX_PROXY_OPTIONS_PER_GROUP))
-                .unwrap_or(0);
-            for item_index in 0..item_count {
-                let row_ids = Self::proxy_item_row_ids(group_index, item_index);
-                if self.ui.mp_button(&row_ids.select_btn).clicked(actions) {
-                    self.select_proxy_item_for_group(cx, group_index, item_index);
-                }
-            }
-        }
-        if let Some(value) = self
-            .ui
-            .text_input(ids!(dashboard.rules_search_input))
-            .changed(actions)
-        {
-            self.state.rules_query = value;
-            self.reset_rules_pagination();
-            self.refresh_ui(cx);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.rules_filter_all_btn))
-            .clicked(actions)
-        {
-            self.state.rules_filter = RuleFilter::All;
-            self.reset_rules_pagination();
-            self.refresh_ui(cx);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.rules_filter_domain_btn))
-            .clicked(actions)
-        {
-            self.state.rules_filter = RuleFilter::Domain;
-            self.reset_rules_pagination();
-            self.refresh_ui(cx);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.rules_filter_ip_cidr_btn))
-            .clicked(actions)
-        {
-            self.state.rules_filter = RuleFilter::IpCidr;
-            self.reset_rules_pagination();
-            self.refresh_ui(cx);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.rules_filter_process_btn))
-            .clicked(actions)
-        {
-            self.state.rules_filter = RuleFilter::ProcessName;
-            self.reset_rules_pagination();
-            self.refresh_ui(cx);
-        }
-        if let Some(on) = self
-            .ui
-            .mp_switch(ids!(dashboard.system_proxy_switch))
-            .changed(actions)
-        {
-            let strings = i18n::strings(self.state.language);
-            info!("system proxy toggle requested: on={on}");
-            let result = if on {
-                self.core.enable_system_proxy()
-            } else {
-                self.core.disable_system_proxy()
-            };
 
-            match result {
-                Ok(()) => {
-                    self.state.system_proxy_enabled = on;
-                    if on {
-                        self.apply_saved_proxy_group_selections_to_core();
-                        self.sync_from_core();
-                        self.snapshot_proxy_group_selections();
-                    }
-                    let message = if on {
-                        strings.system_proxy_enable_success
-                    } else {
-                        strings.system_proxy_disable_success
-                    };
-                    info!("system proxy toggle succeeded: on={on}");
-                    self.push_notification(cx, NotificationLevel::Success, message.to_string());
-                }
-                Err(error) => {
-                    self.state.system_proxy_enabled = self.core.is_system_proxy_enabled();
-                    let message = if on {
-                        format!("{}: {error}", strings.system_proxy_enable_failed_prefix)
-                    } else {
-                        format!("{}: {error}", strings.system_proxy_disable_failed_prefix)
-                    };
-                    error!("system proxy toggle failed: {error}");
-                    self.push_notification(cx, NotificationLevel::Error, message);
-                }
-            }
-            self.persist_settings();
-            self.refresh_ui(cx);
-        }
-        if let Some(on) = self
-            .ui
-            .mp_switch(ids!(dashboard.auto_launch_switch))
-            .changed(actions)
-        {
-            let previous = self.state.auto_launch_enabled;
-            self.state.auto_launch_enabled = on;
-            if let Err(error) = self
-                .core
-                .configure_startup(self.state.auto_launch_enabled, self.state.silent_start_enabled)
-            {
-                let strings = i18n::strings(self.state.language);
-                self.state.auto_launch_enabled = previous;
-                self.push_notification(
-                    cx,
-                    NotificationLevel::Error,
-                    format!("{}: {error}", strings.auto_launch_update_failed_prefix),
-                );
-            } else {
-                self.sync_startup_state_from_core();
-                self.persist_settings();
-            }
-            self.refresh_ui(cx);
-        }
-        if let Some(on) = self
-            .ui
-            .mp_switch(ids!(dashboard.silent_start_switch))
-            .changed(actions)
-        {
-            let previous = self.state.silent_start_enabled;
-            self.state.silent_start_enabled = on;
-            if self.state.auto_launch_enabled {
-                if let Err(error) = self
-                    .core
-                    .configure_startup(self.state.auto_launch_enabled, self.state.silent_start_enabled)
-                {
-                    let strings = i18n::strings(self.state.language);
-                    self.state.silent_start_enabled = previous;
-                    self.push_notification(
-                        cx,
-                        NotificationLevel::Error,
-                        format!("{}: {error}", strings.silent_start_update_failed_prefix),
-                    );
-                } else {
-                    self.sync_startup_state_from_core();
-                }
-            }
-            self.persist_settings();
-            self.refresh_ui(cx);
-        }
-        if let Some(index) = self
-            .ui
-            .drop_down(ids!(dashboard.language_dropdown))
-            .changed(actions)
-        {
-            self.state.language = Language::from_index(index);
-            self.persist_settings();
-            self.refresh_ui(cx);
-        }
-        if let Some(index) = self
-            .ui
-            .drop_down(ids!(dashboard.theme_dropdown))
-            .changed(actions)
-        {
-            self.state.theme = ThemePreference::from_index(index);
-            self.persist_settings();
-            self.refresh_ui(cx);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.clash_core_upgrade_btn))
-            .clicked(actions)
-        {
-            self.start_core_upgrade(cx);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.clash_core_restart_btn))
-            .clicked(actions)
-        {
-            self.start_core_restart(cx);
-        }
-        if self
-            .ui
-            .mp_button(ids!(dashboard.clash_port_save_btn))
-            .clicked(actions)
-        {
-            let strings = i18n::strings(self.state.language);
-            let trimmed = self.state.clash_port_input.trim();
-            let parsed = trimmed.parse::<u16>().ok().filter(|port| *port > 0);
-            if let Some(port) = parsed {
-                let mut config = self.core.config();
-                config.mixed_port = port;
-                match self.core.update_config(config) {
-                    Ok(()) => {
-                        self.state.clash_mixed_port = port;
-                        self.state.clash_port_input = port.to_string();
-                        self.persist_settings();
-                        self.push_notification(
-                            cx,
-                            NotificationLevel::Success,
-                            strings.clash_port_update_success.to_string(),
-                        );
-                    }
-                    Err(error) => {
-                        self.push_notification(
-                            cx,
-                            NotificationLevel::Error,
-                            format!("{}: {error}", strings.clash_port_update_failed_prefix),
-                        );
-                    }
-                }
-            } else {
-                self.push_notification(
-                    cx,
-                    NotificationLevel::Error,
-                    strings.clash_port_update_invalid.to_string(),
-                );
-            }
-            self.refresh_ui(cx);
-        }
+        self.handle_profiles_actions(cx, actions);
+        self.handle_proxy_groups_actions(cx, actions);
+        self.handle_rules_actions(cx, actions);
+        self.handle_settings_actions(cx, actions);
     }
 }

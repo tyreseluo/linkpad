@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use linkpad_core::ProxyMode;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -19,6 +19,7 @@ pub struct AppState {
     pub active_proxy_group: Option<String>,
     pub proxy_group_selected: HashMap<String, usize>,
     pub system_proxy_enabled: bool,
+    pub close_to_tray_enabled: bool,
     pub auto_launch_enabled: bool,
     pub silent_start_enabled: bool,
     pub clash_mixed_port: u16,
@@ -110,6 +111,7 @@ impl Default for AppState {
             active_proxy_group: None,
             proxy_group_selected: HashMap::new(),
             system_proxy_enabled: false,
+            close_to_tray_enabled: true,
             auto_launch_enabled: false,
             silent_start_enabled: false,
             clash_mixed_port: 7890,

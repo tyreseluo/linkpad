@@ -9,6 +9,7 @@ pub struct LoadedSettings {
     pub language: Language,
     pub theme: ThemePreference,
     pub system_proxy_enabled: bool,
+    pub close_to_tray_enabled: bool,
     pub auto_launch_enabled: bool,
     pub silent_start_enabled: bool,
     pub clash_mixed_port: u16,
@@ -21,6 +22,8 @@ struct PersistedSettings {
     theme: String,
     #[serde(default)]
     system_proxy_enabled: bool,
+    #[serde(default = "default_close_to_tray_enabled")]
+    close_to_tray_enabled: bool,
     #[serde(default)]
     auto_launch_enabled: bool,
     #[serde(default)]
@@ -42,6 +45,7 @@ pub fn load() -> Option<LoadedSettings> {
         language,
         theme,
         system_proxy_enabled: persisted.system_proxy_enabled,
+        close_to_tray_enabled: persisted.close_to_tray_enabled,
         auto_launch_enabled: persisted.auto_launch_enabled,
         silent_start_enabled: persisted.silent_start_enabled,
         clash_mixed_port: normalize_port(persisted.clash_mixed_port),
@@ -53,6 +57,7 @@ pub fn save(
     language: Language,
     theme: ThemePreference,
     system_proxy_enabled: bool,
+    close_to_tray_enabled: bool,
     auto_launch_enabled: bool,
     silent_start_enabled: bool,
     clash_mixed_port: u16,
@@ -71,6 +76,7 @@ pub fn save(
         language: serialize_language(language).to_string(),
         theme: serialize_theme(theme).to_string(),
         system_proxy_enabled,
+        close_to_tray_enabled,
         auto_launch_enabled,
         silent_start_enabled,
         clash_mixed_port: normalize_port(clash_mixed_port),
@@ -122,6 +128,10 @@ fn serialize_theme(theme: ThemePreference) -> &'static str {
 
 fn default_mixed_port() -> u16 {
     7890
+}
+
+fn default_close_to_tray_enabled() -> bool {
+    true
 }
 
 fn normalize_port(port: u16) -> u16 {

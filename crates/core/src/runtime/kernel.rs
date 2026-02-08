@@ -253,7 +253,8 @@ impl KernelRuntime {
 
         if let Some(from_env) = std::env::var_os("LINKPAD_MIHOMO_PATH") {
             let path = PathBuf::from(from_env);
-            if let Some(resolved) = resolve_kernel_candidate_path(&path, &mut non_executable_paths) {
+            if let Some(resolved) = resolve_kernel_candidate_path(&path, &mut non_executable_paths)
+            {
                 return Ok(resolved);
             }
             checked_paths.push(path);
@@ -263,7 +264,8 @@ impl KernelRuntime {
         candidate_paths.insert(0, PathBuf::from(&self.kernel_binary));
 
         for path in candidate_paths {
-            if let Some(resolved) = resolve_kernel_candidate_path(&path, &mut non_executable_paths) {
+            if let Some(resolved) = resolve_kernel_candidate_path(&path, &mut non_executable_paths)
+            {
                 return Ok(resolved);
             }
             checked_paths.push(path);
@@ -299,9 +301,7 @@ impl KernelRuntime {
             ));
         }
 
-        Err(CoreError::InvalidConfig(format!(
-            "{message}"
-        )))
+        Err(CoreError::InvalidConfig(format!("{message}")))
     }
 
     fn known_kernel_candidates(&self) -> Vec<PathBuf> {
@@ -340,7 +340,9 @@ impl KernelRuntime {
             config_dir.push(platform_kernel_binary_name());
             return config_dir;
         }
-        self.runtime_dir.join("bin").join(platform_kernel_binary_name())
+        self.runtime_dir
+            .join("bin")
+            .join(platform_kernel_binary_name())
     }
 
     fn install_target_path(&self) -> PathBuf {
@@ -456,7 +458,8 @@ fn select_release_asset(assets: &[GithubReleaseAsset]) -> Option<&GithubReleaseA
     let mut matches = assets
         .iter()
         .filter(|asset| {
-            asset.name.starts_with(&required_prefix) && asset.name.to_ascii_lowercase().ends_with(".gz")
+            asset.name.starts_with(&required_prefix)
+                && asset.name.to_ascii_lowercase().ends_with(".gz")
         })
         .collect::<Vec<_>>();
 
@@ -501,9 +504,7 @@ fn download_release_asset_by_candidates(
     let mut attempts = Vec::new();
     for asset_name in candidates {
         let urls = [
-            format!(
-                "https://github.com/MetaCubeX/mihomo/releases/download/{tag}/{asset_name}"
-            ),
+            format!("https://github.com/MetaCubeX/mihomo/releases/download/{tag}/{asset_name}"),
             format!("https://github.com/MetaCubeX/mihomo/releases/latest/download/{asset_name}"),
         ];
         for url in &urls {
@@ -645,7 +646,11 @@ fn release_os_tag() -> &'static str {
     "windows"
 }
 
-#[cfg(all(not(target_os = "macos"), not(target_os = "linux"), not(target_os = "windows")))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(target_os = "linux"),
+    not(target_os = "windows")
+))]
 fn release_os_tag() -> &'static str {
     std::env::consts::OS
 }
@@ -766,7 +771,10 @@ fn resolve_kernel_candidate_path(
     find_kernel_binary_in_dir(path, non_executable_paths)
 }
 
-fn find_kernel_binary_in_dir(dir: &Path, non_executable_paths: &mut Vec<PathBuf>) -> Option<PathBuf> {
+fn find_kernel_binary_in_dir(
+    dir: &Path,
+    non_executable_paths: &mut Vec<PathBuf>,
+) -> Option<PathBuf> {
     let entries = fs::read_dir(dir).ok()?;
     let mut candidates = Vec::new();
     let mut fallback = Vec::new();

@@ -50,11 +50,13 @@ impl StartupManager {
     fn install_macos_launch_agent(&self, silent_start: bool) -> CoreResult<()> {
         let path = self.launch_agent_path()?;
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| CoreError::InvalidConfig(error.to_string()))?;
+            fs::create_dir_all(parent)
+                .map_err(|error| CoreError::InvalidConfig(error.to_string()))?;
         }
 
-        let executable = std::env::current_exe()
-            .map_err(|error| CoreError::InvalidConfig(format!("failed to resolve current executable: {error}")))?;
+        let executable = std::env::current_exe().map_err(|error| {
+            CoreError::InvalidConfig(format!("failed to resolve current executable: {error}"))
+        })?;
         let plist = build_launch_agent_plist(&executable, silent_start);
         fs::write(&path, plist).map_err(|error| CoreError::InvalidConfig(error.to_string()))?;
         Ok(())
@@ -76,8 +78,8 @@ impl StartupManager {
             return Ok(StartupStatus::default());
         }
 
-        let content =
-            fs::read_to_string(path).map_err(|error| CoreError::InvalidConfig(error.to_string()))?;
+        let content = fs::read_to_string(path)
+            .map_err(|error| CoreError::InvalidConfig(error.to_string()))?;
         let silent_start = content.contains(&format!("<string>{SILENT_START_ARG}</string>"));
         Ok(StartupStatus {
             auto_launch: true,

@@ -315,7 +315,10 @@ impl Core {
         )
     }
 
-    pub fn probe_proxy_delays(&self, proxy_names: &[String]) -> CoreResult<BTreeMap<String, Option<u32>>> {
+    pub fn probe_proxy_delays(
+        &self,
+        proxy_names: &[String],
+    ) -> CoreResult<BTreeMap<String, Option<u32>>> {
         if proxy_names.is_empty() {
             return Ok(BTreeMap::new());
         }
@@ -1146,9 +1149,8 @@ fn validate_proxy_selection(
     group_name: &str,
     proxy_name: &str,
 ) -> CoreResult<()> {
-    let profile = active_profile.ok_or_else(|| {
-        CoreError::InvalidConfig("no active profile to select proxy".to_string())
-    })?;
+    let profile = active_profile
+        .ok_or_else(|| CoreError::InvalidConfig("no active profile to select proxy".to_string()))?;
     let group = profile
         .proxy_groups
         .iter()
@@ -1205,8 +1207,9 @@ fn normalize_controller_url(raw: &str) -> CoreResult<String> {
     } else {
         format!("http://{trimmed}")
     };
-    let parsed = url::Url::parse(&with_scheme)
-        .map_err(|error| CoreError::InvalidConfig(format!("invalid external-controller: {error}")))?;
+    let parsed = url::Url::parse(&with_scheme).map_err(|error| {
+        CoreError::InvalidConfig(format!("invalid external-controller: {error}"))
+    })?;
     let mut normalized = parsed.to_string();
     if normalized.ends_with('/') {
         normalized.pop();
@@ -1223,9 +1226,7 @@ fn send_proxy_selection_request(
     let endpoint = format!("{}/proxies/{}", controller.base_url, encoded_group);
     let body = format!(
         "{{\"name\":\"{}\"}}",
-        proxy_name
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
+        proxy_name.replace('\\', "\\\\").replace('"', "\\\"")
     );
 
     let client = reqwest::blocking::Client::builder()
@@ -1618,7 +1619,8 @@ rules:
                 "NoNow": {"all": ["A", "B"]}
             }
         }"#;
-        let map = parse_proxy_selection_map_response(body).expect("should parse controller payload");
+        let map =
+            parse_proxy_selection_map_response(body).expect("should parse controller payload");
         assert_eq!(map.get("GLOBAL"), Some(&"DIRECT".to_string()));
         assert_eq!(map.get("MyGroup"), Some(&"Proxy A".to_string()));
         assert_eq!(map.get("NoMembers"), Some(&"X".to_string()));
