@@ -70,10 +70,25 @@ impl App {
     }
 
     pub(super) fn handle_tray_activate(&mut self, cx: &mut Cx) {
+        if self.window_focused {
+            return;
+        }
+
         let Some(window_id) = self.window_id else {
             return;
         };
-        cx.push_unique_platform_op(CxOsOp::RestoreWindow(window_id));
+        #[cfg(target_os = "windows")]
+        {
+            cx.push_unique_platform_op(CxOsOp::RestoreWindow(window_id));
+            cx.push_unique_platform_op(CxOsOp::SetTopmost(window_id, true));
+            cx.push_unique_platform_op(CxOsOp::SetTopmost(window_id, false));
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            // The tray backend already activates/unhides and brings windows to front on click.
+            cx.push_unique_platform_op(CxOsOp::Deminiaturize(window_id));
+        }
     }
 
     pub(super) fn sync_tray_menu(&mut self, strings: &i18n::Strings) {

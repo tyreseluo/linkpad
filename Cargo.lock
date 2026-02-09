@@ -749,7 +749,7 @@ dependencies = [
 
 [[package]]
 name = "linkpad"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "dirs",
  "linkpad-core",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "linkpad-core"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "base64",
  "chrono",

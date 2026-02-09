@@ -147,6 +147,8 @@ pub struct App {
     app_menu_installed: bool,
     #[rust]
     window_id: Option<WindowId>,
+    #[rust]
+    window_focused: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -264,11 +266,18 @@ impl AppMain for App {
         }
         if let Event::WindowGotFocus(window_id) = event {
             self.window_id = Some(*window_id);
+            self.window_focused = true;
+        }
+        if let Event::WindowLostFocus(window_id) = event {
+            if self.window_id == Some(*window_id) {
+                self.window_focused = false;
+            }
         }
         if let Event::WindowCloseRequested(ev) = event {
             self.window_id = Some(ev.window_id);
             if self.state.close_to_tray_enabled {
                 ev.accept_close.set(false);
+                self.window_focused = false;
                 #[cfg(target_os = "windows")]
                 {
                     cx.push_unique_platform_op(CxOsOp::MinimizeWindow(ev.window_id));

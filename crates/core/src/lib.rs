@@ -745,7 +745,7 @@ fn fetch_profile_content(source_url: &str) -> CoreResult<String> {
     let mut last_body: Option<String> = None;
     let mut last_error: Option<CoreError> = None;
 
-    for user_agent in ["linkpad/0.1.0", "clash-verge/2.4.0"] {
+    for user_agent in ["linkpad/0.1.2", "clash-verge/2.4.0"] {
         match fetch_profile_content_once(&client, source_url, user_agent) {
             Ok(body) => {
                 if looks_like_clash_yaml(&body) {
