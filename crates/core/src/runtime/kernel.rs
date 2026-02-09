@@ -362,19 +362,34 @@ impl KernelRuntime {
         let mut candidates = Vec::new();
         let binary_name = platform_kernel_binary_name();
 
-        candidates.push(self.runtime_dir.join("bin").join(binary_name));
+        let runtime_bin_dir = self.runtime_dir.join("bin");
+        candidates.push(runtime_bin_dir.join(binary_name));
+        candidates.push(runtime_bin_dir);
 
         if let Some(mut config_dir) = dirs::config_dir() {
             config_dir.push("linkpad");
             config_dir.push("bin");
-            config_dir.push(binary_name);
+            candidates.push(config_dir.join(binary_name));
             candidates.push(config_dir);
         }
 
         if let Ok(current_exe) = std::env::current_exe() {
             if let Some(exe_dir) = current_exe.parent() {
                 candidates.push(exe_dir.join(binary_name));
-                candidates.push(exe_dir.join("bin").join(binary_name));
+                let exe_bin_dir = exe_dir.join("bin");
+                candidates.push(exe_bin_dir.join(binary_name));
+                candidates.push(exe_bin_dir);
+                if let Some(parent_dir) = exe_dir.parent() {
+                    for resources_dir in ["Resources", "resources"] {
+                        let resources_root = parent_dir.join(resources_dir);
+                        let linkpad_bin_dir = resources_root.join("linkpad").join("bin");
+                        candidates.push(linkpad_bin_dir.join(binary_name));
+                        candidates.push(linkpad_bin_dir);
+                        let resources_bin_dir = resources_root.join("bin");
+                        candidates.push(resources_bin_dir.join(binary_name));
+                        candidates.push(resources_bin_dir);
+                    }
+                }
             }
         }
 

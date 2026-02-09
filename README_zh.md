@@ -71,15 +71,31 @@ cargo run -p linkpad
 
 ## 内核运行说明
 
-Linkpad 会在多个位置查找 `mihomo`。推荐方式：
+Linkpad 会在多个位置查找 `mihomo`，优先级大致如下：
 
 - 直接设置 `LINKPAD_MIHOMO_PATH`
-- 或把二进制放到：
-  - `~/Library/Application Support/linkpad/bin/mihomo`（macOS）
+- `~/Library/Application Support/linkpad/bin/mihomo`（macOS，`Upgrade` 后会写入这里）
+- 安装包内置资源（macOS 例如 `Linkpad.app/Contents/Resources/linkpad/bin/mihomo`）
+- 系统 `PATH`
+
+发布流程会在 `.github/workflows/release.yml` 中执行 `scripts/prepare-bundled-mihomo.sh`：
+
+- 仅使用 Linkpad 内部路径 `linkpad/resources/bin/` 的内核（不会复用本机 `mihomo`）
+- 如果内部内核不存在，则按目标平台/架构从 Mihomo release 下载并写入内部路径
+- 内嵌产物使用版本化命名（例如 `mihomo-darwin-arm64-v1.19.20`）
+- 目标平台可由打包环境自动识别，也可用环境变量强制指定
 
 常用环境变量：
 
 - `LINKPAD_MIHOMO_PATH`：指定 Mihomo 路径
+- `LINKPAD_BUNDLED_MIHOMO_VERSION`：指定打包下载的 Mihomo 版本（如 `v1.19.19`）
+- `LINKPAD_BUNDLED_MIHOMO_OS`：强制目标 OS（`darwin` / `windows` / `linux` / `android`）
+- `LINKPAD_BUNDLED_MIHOMO_ARCH`：强制目标架构（`arm64` / `amd64` / `386` / `armv7`）
+- `LINKPAD_BUNDLED_MIHOMO_TARGET`：强制目标 triple（如 `aarch64-apple-darwin`）
+- `LINKPAD_BUNDLED_MIHOMO_REFRESH=1`：打包前强制重新准备内嵌内核
+- `LINKPAD_BUNDLED_MIHOMO_STRICT=1`：严格模式，仅允许使用内部内核，缺失时直接失败
+- `LINKPAD_BUNDLED_MIHOMO_TEST_MODE=1`：测试模式，不联网下载，改为从本地目录读取内核
+- `LINKPAD_BUNDLED_MIHOMO_TEST_DIR=/path/to/dir`：测试模式下的本地内核目录
 - `LINKPAD_GITHUB_TOKEN`：提高 GitHub API 限流阈值（用于升级）
 - `RUST_LOG=linkpad=info,linkpad_core=info`：开启关键日志
 
@@ -96,4 +112,3 @@ Linkpad 会在多个位置查找 `mihomo`。推荐方式：
 - 开机启动管理目前只实现了 macOS
 - TUN 模式尚未接入
 - App Menu 目前仅预留（Tray 已可用）
-

@@ -12,6 +12,11 @@ on:
         required: false
         type: string
         default: ""
+      mihomo_version:
+        description: "Bundled Mihomo version (example: v1.19.20)"
+        required: false
+        type: string
+        default: "v1.19.20"
       prerelease:
         description: "Mark release as prerelease"
         required: false
@@ -96,11 +101,25 @@ jobs:
     name: Package macOS arm64 (.dmg)
     needs: [resolve_release, create_release]
     runs-on: macos-14
+    env:
+      MIHOMO_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mihomo_version || 'v1.19.20' }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust Stable
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Prepare bundled Mihomo (darwin arm64)
+        run: |
+          LINKPAD_BUNDLED_MIHOMO_TARGET=aarch64-apple-darwin \
+          LINKPAD_BUNDLED_MIHOMO_VERSION="${MIHOMO_VERSION}" \
+          LINKPAD_BUNDLED_MIHOMO_REFRESH=1 \
+          bash scripts/prepare-bundled-mihomo.sh
+
+      - name: Verify bundled Mihomo
+        run: |
+          ls -lah linkpad/resources/bin
+          test -n "$(find linkpad/resources/bin -maxdepth 1 -type f -name 'mihomo-darwin-arm64-*' | head -n 1)"
 
       - name: Build and package
         uses: Project-Robius-China/makepad-packaging-action@main
