@@ -2,6 +2,7 @@ use crate::{CoreError, CoreResult};
 use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, USER_AGENT};
+use robius_directories::ProjectDirs;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -18,6 +19,9 @@ const DEFAULT_KERNEL_BINARY: &str = "mihomo";
 const RUNTIME_CONFIG_FILE: &str = "runtime.yaml";
 const RUNTIME_LOG_FILE: &str = "mihomo.log";
 const RUNTIME_PID_FILE: &str = "mihomo.pid";
+const APP_QUALIFIER: &str = "";
+const APP_ORGANIZATION: &str = "";
+const APP_NAME: &str = "linkpad";
 const MIHOMO_RELEASE_API: &str = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest";
 const MIHOMO_RELEASE_LATEST_PAGE: &str = "https://github.com/MetaCubeX/mihomo/releases/latest";
 const LINKPAD_HTTP_USER_AGENT: &str = "linkpad-core/0.1";
@@ -62,8 +66,7 @@ pub struct KernelRuntime {
 
 impl Default for KernelRuntime {
     fn default() -> Self {
-        let mut runtime_dir = dirs::config_dir().unwrap_or_else(std::env::temp_dir);
-        runtime_dir.push("linkpad");
+        let mut runtime_dir = app_config_dir().unwrap_or_else(std::env::temp_dir);
         runtime_dir.push("runtime");
         Self {
             child: None,
@@ -366,11 +369,10 @@ impl KernelRuntime {
         candidates.push(runtime_bin_dir.join(binary_name));
         candidates.push(runtime_bin_dir);
 
-        if let Some(mut config_dir) = dirs::config_dir() {
-            config_dir.push("linkpad");
-            config_dir.push("bin");
-            candidates.push(config_dir.join(binary_name));
-            candidates.push(config_dir);
+        if let Some(config_dir) = app_config_dir() {
+            let config_bin_dir = config_dir.join("bin");
+            candidates.push(config_bin_dir.join(binary_name));
+            candidates.push(config_bin_dir);
         }
 
         if let Ok(current_exe) = std::env::current_exe() {
@@ -403,11 +405,8 @@ impl KernelRuntime {
     }
 
     fn default_install_path(&self) -> PathBuf {
-        if let Some(mut config_dir) = dirs::config_dir() {
-            config_dir.push("linkpad");
-            config_dir.push("bin");
-            config_dir.push(platform_kernel_binary_name());
-            return config_dir;
+        if let Some(config_dir) = app_config_dir() {
+            return config_dir.join("bin").join(platform_kernel_binary_name());
         }
         self.runtime_dir
             .join("bin")
@@ -427,6 +426,11 @@ impl Drop for KernelRuntime {
     fn drop(&mut self) {
         let _ = self.stop();
     }
+}
+
+fn app_config_dir() -> Option<PathBuf> {
+    let project_dirs = ProjectDirs::from(APP_QUALIFIER, APP_ORGANIZATION, APP_NAME)?;
+    Some(project_dirs.config_dir().to_path_buf())
 }
 
 fn fetch_latest_release() -> CoreResult<GithubRelease> {

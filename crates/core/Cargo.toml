@@ -16,6 +16,7 @@ base64           = { workspace = true }
 percent-encoding = { workspace = true }
 chrono           = { workspace = true }
 dirs             = { workspace = true }
+robius-directories = { workspace = true }
 flate2           = { workspace = true }
 sha2             = { workspace = true }
 tracing          = { workspace = true }

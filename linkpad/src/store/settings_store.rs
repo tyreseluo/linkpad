@@ -88,8 +88,7 @@ pub fn save(
 }
 
 fn settings_path() -> Option<PathBuf> {
-    let mut dir = dirs::config_dir()?;
-    dir.push("linkpad");
+    let mut dir = super::app_config_dir()?;
     dir.push("settings.json");
     Some(dir)
 }

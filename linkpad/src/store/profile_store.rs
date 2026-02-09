@@ -1,4 +1,5 @@
 use linkpad_core::Profile;
+use robius_directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -9,6 +10,8 @@ struct PersistedProfiles {
 }
 
 pub fn load() -> Vec<Profile> {
+    migrate_legacy_profiles_file();
+
     let Some(path) = profiles_path() else {
         return Vec::new();
     };
@@ -37,8 +40,52 @@ pub fn save(profiles: &[Profile]) -> std::io::Result<()> {
 }
 
 fn profiles_path() -> Option<PathBuf> {
-    let mut dir = dirs::config_dir()?;
-    dir.push("linkpad");
+    let mut dir = super::app_config_dir()?;
     dir.push("profiles.json");
     Some(dir)
+}
+
+fn migrate_legacy_profiles_file() {
+    let Some(new_path) = profiles_path() else {
+        return;
+    };
+
+    if new_path.exists() {
+        return;
+    }
+
+    let Some(legacy_path) = legacy_profiles_path(&new_path) else {
+        return;
+    };
+
+    if let Some(parent) = new_path.parent() {
+        if fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+
+    let _ = fs::copy(legacy_path, new_path);
+}
+
+fn legacy_profiles_path(new_path: &PathBuf) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(base_dirs) = BaseDirs::new() {
+        let mut legacy = base_dirs.config_dir().to_path_buf();
+        legacy.push("linkpad");
+        legacy.push("profiles.json");
+        candidates.push(legacy);
+    }
+
+    if let Some(mut legacy) = super::app_config_dir() {
+        legacy.push("linkpad");
+        legacy.push("profiles.json");
+        candidates.push(legacy);
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+        .into_iter()
+        .find(|path| path != new_path && path.is_file())
 }
