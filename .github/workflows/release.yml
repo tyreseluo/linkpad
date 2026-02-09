@@ -109,5 +109,6 @@ jobs:
         with:
           project_path: linkpad
           packager_formats: dmg
+          asset_name_template: __APP__-v__VERSION__-__PLATFORM__-__ARCH__-__MODE__.__EXT__
           releaseId: ${{ needs.create_release.outputs.release_id }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
