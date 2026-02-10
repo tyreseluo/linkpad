@@ -384,9 +384,19 @@ impl KernelRuntime {
                 if let Some(parent_dir) = exe_dir.parent() {
                     for resources_dir in ["Resources", "resources"] {
                         let resources_root = parent_dir.join(resources_dir);
+                        let linkpad_nested_resources_bin_dir =
+                            resources_root.join("linkpad").join("resources").join("bin");
+                        candidates.push(linkpad_nested_resources_bin_dir.join(binary_name));
+                        candidates.push(linkpad_nested_resources_bin_dir);
+
                         let linkpad_bin_dir = resources_root.join("linkpad").join("bin");
                         candidates.push(linkpad_bin_dir.join(binary_name));
                         candidates.push(linkpad_bin_dir);
+
+                        let nested_resources_bin_dir = resources_root.join("resources").join("bin");
+                        candidates.push(nested_resources_bin_dir.join(binary_name));
+                        candidates.push(nested_resources_bin_dir);
+
                         let resources_bin_dir = resources_root.join("bin");
                         candidates.push(resources_bin_dir.join(binary_name));
                         candidates.push(resources_bin_dir);

@@ -27,6 +27,21 @@ on:
         required: false
         type: boolean
         default: false
+      build_macos_arm64:
+        description: "Build macOS arm64 package"
+        required: false
+        type: boolean
+        default: true
+      build_windows_amd64:
+        description: "Build Windows amd64 package"
+        required: false
+        type: boolean
+        default: true
+      build_windows_arm64:
+        description: "Build Windows arm64 package"
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -81,6 +96,7 @@ jobs:
     name: Create GitHub Release
     needs: resolve_release
     runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' || github.event.inputs.build_macos_arm64 == 'true' || github.event.inputs.build_windows_amd64 == 'true' || github.event.inputs.build_windows_arm64 == 'true' }}
     outputs:
       release_id: ${{ steps.release.outputs.id }}
     steps:
@@ -101,6 +117,7 @@ jobs:
     name: for_macos_arm64
     needs: [resolve_release, create_release]
     runs-on: macos-14
+    if: ${{ github.event_name == 'push' || github.event.inputs.build_macos_arm64 == 'true' }}
     env:
       MIHOMO_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mihomo_version || 'v1.19.20' }}
     steps:
@@ -136,6 +153,7 @@ jobs:
     name: for_windows_amd64
     needs: [resolve_release, create_release]
     runs-on: windows-2022
+    if: ${{ github.event_name == 'push' || github.event.inputs.build_windows_amd64 == 'true' }}
     env:
       MIHOMO_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mihomo_version || 'v1.19.20' }}
     steps:
@@ -180,6 +198,7 @@ jobs:
     name: for_windows_arm64
     needs: [resolve_release, create_release]
     runs-on: windows-11-arm
+    if: ${{ github.event_name == 'push' || github.event.inputs.build_windows_arm64 == 'true' }}
     env:
       MIHOMO_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mihomo_version || 'v1.19.20' }}
     steps:
