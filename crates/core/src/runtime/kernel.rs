@@ -91,6 +91,7 @@ impl KernelRuntime {
         let log_file = self.open_log_file()?;
         let kernel_binary = self.resolve_kernel_binary()?;
         let mut command = Command::new(&kernel_binary);
+        configure_windows_hidden_command(&mut command);
         command
             .arg("-f")
             .arg(&config_path)
@@ -918,7 +919,9 @@ fn find_in_path(binary_name: &str) -> Option<PathBuf> {
 fn detect_kernel_version(path: &Path) -> Option<String> {
     let commands: &[&[&str]] = &[&["-v"], &["--version"], &["version"]];
     for args in commands {
-        let output = match Command::new(path).args(*args).output() {
+        let mut command = Command::new(path);
+        configure_windows_hidden_command(&mut command);
+        let output = match command.args(*args).output() {
             Ok(output) => output,
             Err(_) => continue,
         };
@@ -1057,6 +1060,16 @@ fn is_executable_file(path: &Path) -> bool {
 fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
+
+#[cfg(target_os = "windows")]
+fn configure_windows_hidden_command(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_windows_hidden_command(_command: &mut Command) {}
 
 #[cfg(target_os = "windows")]
 fn platform_kernel_binary_name() -> &'static str {
