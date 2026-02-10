@@ -1,4 +1,4 @@
-name: Linkpad Release (macOS Apple Silicon)
+name: Linkpad Release
 
 on:
   push:
@@ -97,8 +97,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  package_macos_arm64:
-    name: Package macOS arm64 (.dmg)
+  for_macos_arm64:
+    name: for_macos_arm64
     needs: [resolve_release, create_release]
     runs-on: macos-14
     env:
@@ -128,6 +128,94 @@ jobs:
         with:
           project_path: linkpad
           packager_formats: dmg
+          asset_name_template: __APP__-v__VERSION__-__PLATFORM__-__ARCH__-__MODE__.__EXT__
+          releaseId: ${{ needs.create_release.outputs.release_id }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  for_windows_amd64:
+    name: for_windows_amd64
+    needs: [resolve_release, create_release]
+    runs-on: windows-2022
+    env:
+      MIHOMO_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mihomo_version || 'v1.19.20' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Ensure unzip is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Command unzip -ErrorAction SilentlyContinue)) {
+            choco install unzip -y --no-progress
+          }
+
+      - name: Prepare bundled Mihomo (windows amd64)
+        shell: bash
+        run: |
+          LINKPAD_BUNDLED_MIHOMO_TARGET=x86_64-pc-windows-msvc \
+          LINKPAD_BUNDLED_MIHOMO_VERSION="${MIHOMO_VERSION}" \
+          LINKPAD_BUNDLED_MIHOMO_REFRESH=1 \
+          bash scripts/prepare-bundled-mihomo.sh
+
+      - name: Verify bundled Mihomo
+        shell: bash
+        run: |
+          ls -lah linkpad/resources/bin
+          test -n "$(find linkpad/resources/bin -maxdepth 1 -type f -name 'mihomo-windows-amd64-*.exe' | head -n 1)"
+
+      - name: Build and package
+        uses: Project-Robius-China/makepad-packaging-action@main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          project_path: linkpad
+          packager_formats: nsis
+          asset_name_template: __APP__-v__VERSION__-__PLATFORM__-__ARCH__-__MODE__.__EXT__
+          releaseId: ${{ needs.create_release.outputs.release_id }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  for_windows_arm64:
+    name: for_windows_arm64
+    needs: [resolve_release, create_release]
+    runs-on: windows-11-arm
+    env:
+      MIHOMO_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mihomo_version || 'v1.19.20' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Ensure unzip is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Command unzip -ErrorAction SilentlyContinue)) {
+            choco install unzip -y --no-progress
+          }
+
+      - name: Prepare bundled Mihomo (windows arm64)
+        shell: bash
+        run: |
+          LINKPAD_BUNDLED_MIHOMO_TARGET=aarch64-pc-windows-msvc \
+          LINKPAD_BUNDLED_MIHOMO_VERSION="${MIHOMO_VERSION}" \
+          LINKPAD_BUNDLED_MIHOMO_REFRESH=1 \
+          bash scripts/prepare-bundled-mihomo.sh
+
+      - name: Verify bundled Mihomo
+        shell: bash
+        run: |
+          ls -lah linkpad/resources/bin
+          test -n "$(find linkpad/resources/bin -maxdepth 1 -type f -name 'mihomo-windows-arm64-*.exe' | head -n 1)"
+
+      - name: Build and package
+        uses: Project-Robius-China/makepad-packaging-action@main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          project_path: linkpad
+          packager_formats: nsis
           asset_name_template: __APP__-v__VERSION__-__PLATFORM__-__ARCH__-__MODE__.__EXT__
           releaseId: ${{ needs.create_release.outputs.release_id }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
