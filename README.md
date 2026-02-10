@@ -45,7 +45,9 @@ Linkpad is a desktop proxy client built with Makepad (`makepad-components` + `ma
 ```text
 .
 ├── crates/
-│   └── core/                  # linkpad-core: runtime, parser, proxy/kernel logic
+│   ├── core/                  # linkpad-core: orchestration, profile/parser/kernel/controller logic
+│   ├── proxy/                 # linkpad-proxy: cross-platform system proxy manager + platform backends
+│   └── startup/               # linkpad-startup: cross-platform startup manager + platform backends
 ├── linkpad/
 │   ├── src/
 │   │   ├── app.rs             # app shell + global UI orchestration

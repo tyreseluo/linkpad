@@ -1,0 +1,10 @@
+[package]
+name = "linkpad-startup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+description = "Cross-platform startup item management for Linkpad"
+
+[dependencies]
+dirs = { workspace = true }

@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 
 mod runtime;
 pub use runtime::{KernelInfo, KernelUpgradeInfo, StartupStatus};
-use runtime::{KernelRuntime, StartupManager, SystemProxyManager};
+use runtime::{KernelRuntime, StartupError, StartupManager, SystemProxyError, SystemProxyManager};
 
 pub type CoreResult<T> = Result<T, CoreError>;
 
@@ -43,6 +43,14 @@ impl fmt::Display for CoreError {
 }
 
 impl std::error::Error for CoreError {}
+
+fn map_startup_error(error: StartupError) -> CoreError {
+    CoreError::InvalidConfig(format!("startup manager failed: {error}"))
+}
+
+fn map_system_proxy_error(error: SystemProxyError) -> CoreError {
+    CoreError::InvalidConfig(format!("system proxy manager failed: {error}"))
+}
 
 #[derive(Clone, Debug)]
 pub struct Core {
@@ -143,7 +151,10 @@ impl Core {
         }
 
         if state.system_proxy_enabled {
-            state.system_proxy_manager.disable()?;
+            state
+                .system_proxy_manager
+                .disable()
+                .map_err(map_system_proxy_error)?;
             state.system_proxy_enabled = false;
         }
         state.kernel_runtime.stop()?;
@@ -217,12 +228,15 @@ impl Core {
 
     pub fn configure_startup(&self, auto_launch: bool, silent_start: bool) -> CoreResult<()> {
         let state = self.inner.lock().expect("core state poisoned");
-        state.startup_manager.configure(auto_launch, silent_start)
+        state
+            .startup_manager
+            .configure(auto_launch, silent_start)
+            .map_err(map_startup_error)
     }
 
     pub fn startup_status(&self) -> CoreResult<StartupStatus> {
         let state = self.inner.lock().expect("core state poisoned");
-        state.startup_manager.status()
+        state.startup_manager.status().map_err(map_startup_error)
     }
 
     pub fn enable_system_proxy(&self) -> CoreResult<()> {
@@ -256,7 +270,7 @@ impl Core {
                     let _ = state.kernel_runtime.stop();
                     state.running = false;
                 }
-                Err(error)
+                Err(map_system_proxy_error(error))
             }
         }
     }
@@ -265,7 +279,10 @@ impl Core {
         info!("disable system proxy requested");
         let mut state = self.inner.lock().expect("core state poisoned");
         if state.system_proxy_enabled {
-            state.system_proxy_manager.disable()?;
+            state
+                .system_proxy_manager
+                .disable()
+                .map_err(map_system_proxy_error)?;
             state.system_proxy_enabled = false;
             info!("system proxy disabled");
         }
@@ -1565,8 +1582,6 @@ fn normalize_profile_updated_at(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::path::Path;
 
     #[test]
     fn parses_clash_yaml_profile() {

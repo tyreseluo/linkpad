@@ -14,6 +14,8 @@ authors = ["Tyrese Luo <tyreseluo@outlook.com>"]
 
 [workspace.dependencies]
 linkpad-core       = { path = "crates/core" }
+linkpad-proxy      = { path = "crates/proxy" }
+linkpad-startup    = { path = "crates/startup" }
 makepad-components = { git = "https://github.com/Project-Robius-China/makepad-component.git", branch = "main" }
 makepad-shell      = { git = "https://github.com/Project-Robius-China/makepad-shell.git", branch = "main" }
 robius-directories = { git = "https://github.com/project-robius/robius" }
