@@ -36,7 +36,8 @@ Linkpad is a desktop proxy client built with Makepad (`makepad-components` + `ma
 - Notification system
 - Core runtime integration
 - Start/stop/restart kernel runtime
-- System proxy management (macOS)
+- System proxy management (macOS / Windows)
+- Startup item management (macOS / Windows)
 - Kernel binary upgrade/check flow
 
 ## Project Structure
@@ -108,7 +109,7 @@ Stored under config directory (macOS usually `~/Library/Application Support/link
 
 ## Known Limitations
 
-- System proxy manager is currently implemented for macOS only
-- Startup item management is currently implemented for macOS only
+- System proxy manager is currently implemented for macOS and Windows
+- Startup item management is currently implemented for macOS and Windows
 - TUN mode is not integrated yet
 - App menu is reserved as placeholder (tray is active)

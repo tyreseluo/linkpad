@@ -175,6 +175,10 @@ pub struct App {
     window_id: Option<WindowId>,
     #[rust]
     window_focused: bool,
+    #[rust]
+    silent_start_requested: bool,
+    #[rust]
+    silent_start_applied: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -314,6 +318,7 @@ impl AppMain for App {
                 }
             }
         }
+        self.apply_silent_start_visibility(cx);
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
         self.try_lazy_load_rules_on_scroll(cx, event);
@@ -441,6 +446,53 @@ impl App {
                 eprintln!("failed to initialize tracing subscriber: {init_error}");
             }
         });
+    }
+
+    fn startup_silent_start_requested() -> bool {
+        std::env::args().any(|arg| arg.eq_ignore_ascii_case("--silent-start"))
+    }
+
+    fn apply_silent_start_visibility(&mut self, cx: &mut Cx) {
+        if !self.silent_start_requested || self.silent_start_applied {
+            return;
+        }
+        let Some(window_id) = self.window_id else {
+            return;
+        };
+
+        self.window_focused = false;
+        #[cfg(target_os = "windows")]
+        {
+            cx.push_unique_platform_op(CxOsOp::MinimizeWindow(window_id));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            cx.push_unique_platform_op(CxOsOp::HideWindow(window_id));
+        }
+        self.silent_start_applied = true;
+    }
+
+    fn warmup_core_runtime_on_startup(&mut self) {
+        #[cfg(target_os = "windows")]
+        {
+            if self.core.is_running() {
+                return;
+            }
+            if self.core.active_profile().is_none() {
+                info!("skip startup kernel warmup: no active profile");
+                return;
+            }
+            if let Err(error) = self.core.start() {
+                warn!("startup kernel warmup failed: {error}");
+            } else {
+                info!("startup kernel warmup succeeded");
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = self;
+        }
     }
 
     fn proxy_item_row_ids(row_index: usize, item_index: usize) -> ProxyItemRowIds {
@@ -2265,6 +2317,8 @@ impl App {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         Self::init_logging();
+        self.silent_start_requested = Self::startup_silent_start_requested();
+        self.silent_start_applied = false;
         info!("linkpad startup begin");
         self.load_persisted_settings();
         let _ = self.core.configure_startup(
@@ -2274,10 +2328,12 @@ impl MatchEvent for App {
         self.sync_startup_state_from_core();
         self.apply_clash_config_to_core();
         self.load_persisted_profiles();
+        self.warmup_core_runtime_on_startup();
         self.sync_from_core();
         self.persist_profiles();
         self.set_import_status_ready();
         self.install_shell_integrations();
+        self.apply_silent_start_visibility(cx);
         info!(
             "linkpad startup complete: profiles={}, groups={}, rules={}",
             self.state.profiles.len(),
