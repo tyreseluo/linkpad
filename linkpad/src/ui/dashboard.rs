@@ -707,6 +707,19 @@ live_design! {
                                     draw_text: {text_style: <APP_FONT_BODY>{}, color: (TEXT_MUTED)}
                                 }
                             }
+
+                            <View> {
+                                width: Fill,
+                                height: Fit,
+                                flow: Down,
+                                spacing: (SPACE_1),
+
+                                clash_core_path_label = <Label> {text: "Clash Core Path", draw_text: {text_style: <APP_FONT_BODY>{}, color: (TEXT_PRIMARY)}}
+                                clash_core_path_value = <Label> {
+                                    text: "-"
+                                    draw_text: {text_style: <APP_FONT_BODY>{}, color: (TEXT_MUTED)}
+                                }
+                            }
                         }
                     }
                 }

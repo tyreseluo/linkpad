@@ -25,6 +25,7 @@ pub struct AppState {
     pub clash_mixed_port: u16,
     pub clash_port_input: String,
     pub clash_core_version: String,
+    pub clash_core_path: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +118,7 @@ impl Default for AppState {
             clash_mixed_port: 7890,
             clash_port_input: "7890".to_string(),
             clash_core_version: "Unknown".to_string(),
+            clash_core_path: "-".to_string(),
         }
     }
 }

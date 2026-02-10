@@ -167,7 +167,7 @@ impl KernelRuntime {
                 version: detect_kernel_version(&path).or_else(|| {
                     path.file_name()
                         .and_then(|name| name.to_str())
-                        .and_then(extract_version_from_text)
+                        .and_then(extract_version_from_filename)
                 }),
                 suggested_path,
                 status: "ok".to_string(),
@@ -924,21 +924,52 @@ fn detect_kernel_version(path: &Path) -> Option<String> {
     None
 }
 
+fn extract_version_from_filename(file_name: &str) -> Option<String> {
+    extract_version_from_text(file_name)
+}
+
 fn extract_version_from_text(input: &str) -> Option<String> {
-    for raw in input.split(|c: char| c.is_whitespace() || [',', ';', '(', ')'].contains(&c)) {
-        let token = raw.trim_matches(|c: char| c == '"' || c == '\'' || c == '[' || c == ']');
-        if token.len() >= 2
-            && token.starts_with('v')
-            && token
-                .chars()
-                .nth(1)
-                .map(|ch| ch.is_ascii_digit())
-                .unwrap_or(false)
-        {
-            return Some(token.to_string());
+    for raw in input.split(|c: char| {
+        c.is_whitespace()
+            || [
+                ',', ';', '(', ')', '[', ']', '{', '}', '|', ':', '-', '_', '/', '\\',
+            ]
+            .contains(&c)
+    }) {
+        let token = raw.trim_matches(|c: char| c == '"' || c == '\'' || c == '`');
+        if let Some(version) = parse_version_token(token) {
+            return Some(version);
         }
     }
     None
+}
+
+fn parse_version_token(token: &str) -> Option<String> {
+    if token.len() < 2 || !token.starts_with('v') {
+        return None;
+    }
+    if !token
+        .chars()
+        .nth(1)
+        .map(|ch| ch.is_ascii_digit())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let mut normalized = token
+        .trim_end_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+        .to_string();
+    for suffix in [".exe", ".gz", ".zip", ".tar"] {
+        if normalized.to_ascii_lowercase().ends_with(suffix) && normalized.len() > suffix.len() {
+            normalized.truncate(normalized.len() - suffix.len());
+        }
+    }
+    if normalized.len() >= 2 {
+        Some(normalized)
+    } else {
+        None
+    }
 }
 
 fn resolve_kernel_candidate_path(

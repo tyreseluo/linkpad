@@ -46,7 +46,7 @@ live_design! {
                             margin: {left: 65},
                             align: {x: 0.5},
                             text: "Linkpad",
-                            draw_text: {color: (COLOR_TEXT)}
+                            draw_text: {color: (TEXT_PRIMARY)}
                         }
                     }
                     windows_buttons = {
@@ -632,6 +632,9 @@ impl App {
             .label(ids!(dashboard.clash_core_version_label))
             .set_text(cx, strings.clash_core_version_label);
         self.ui
+            .label(ids!(dashboard.clash_core_path_label))
+            .set_text(cx, strings.clash_core_path_label);
+        self.ui
             .mp_button(ids!(dashboard.clash_port_save_btn))
             .set_text(strings.clash_port_save_button);
         self.ui
@@ -654,6 +657,9 @@ impl App {
         self.ui
             .label(ids!(dashboard.clash_core_version_value))
             .set_text(cx, &self.state.clash_core_version);
+        self.ui
+            .label(ids!(dashboard.clash_core_path_value))
+            .set_text(cx, &self.state.clash_core_path);
 
         let language_dropdown = self.ui.drop_down(ids!(dashboard.language_dropdown));
         language_dropdown.set_labels(cx, i18n::language_options(self.state.language));
@@ -1318,10 +1324,17 @@ impl App {
         self.state.clash_mixed_port = config.mixed_port;
         self.state.clash_port_input = config.mixed_port.to_string();
 
+        let strings = i18n::strings(self.state.language);
         let kernel_info = self.core.kernel_info();
-        self.state.clash_core_version = kernel_info
-            .version
-            .unwrap_or_else(|| "Not Found".to_string());
+        let binary_path = kernel_info.binary_path.clone();
+        self.state.clash_core_version = kernel_info.version.unwrap_or_else(|| {
+            if binary_path.is_some() {
+                strings.clash_core_installed_unknown_version.to_string()
+            } else {
+                strings.clash_core_not_found.to_string()
+            }
+        });
+        self.state.clash_core_path = binary_path.unwrap_or(kernel_info.suggested_path);
         self.state.system_proxy_enabled = self.core.is_system_proxy_enabled();
         self.persist_settings();
     }
@@ -1845,6 +1858,22 @@ impl App {
             );
         self.ui
             .label(ids!(dashboard.clash_core_version_value))
+            .apply_over(
+                cx,
+                live! {
+                    draw_text: { color: (palette.text_muted) }
+                },
+            );
+        self.ui
+            .label(ids!(dashboard.clash_core_path_label))
+            .apply_over(
+                cx,
+                live! {
+                    draw_text: { color: (palette.text_primary) }
+                },
+            );
+        self.ui
+            .label(ids!(dashboard.clash_core_path_value))
             .apply_over(
                 cx,
                 live! {
