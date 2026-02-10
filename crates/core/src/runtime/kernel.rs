@@ -381,9 +381,15 @@ impl KernelRuntime {
                 let exe_bin_dir = exe_dir.join("bin");
                 candidates.push(exe_bin_dir.join(binary_name));
                 candidates.push(exe_bin_dir);
-                if let Some(parent_dir) = exe_dir.parent() {
+                for resources_root in [
+                    exe_dir.to_path_buf(),
+                    exe_dir.parent().map(Path::to_path_buf).unwrap_or_default(),
+                ] {
+                    if resources_root.as_os_str().is_empty() {
+                        continue;
+                    }
                     for resources_dir in ["Resources", "resources"] {
-                        let resources_root = parent_dir.join(resources_dir);
+                        let resources_root = resources_root.join(resources_dir);
                         let linkpad_nested_resources_bin_dir =
                             resources_root.join("linkpad").join("resources").join("bin");
                         candidates.push(linkpad_nested_resources_bin_dir.join(binary_name));
