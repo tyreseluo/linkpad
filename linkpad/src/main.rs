@@ -1,4 +1,9 @@
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+// This cfg option hides the command prompt console window on Windows.
+// TODO: move this into Makepad itself as an addition to the `MAKEPAD` env var.
+#![cfg_attr(
+    all(feature = "hide_windows_console", target_os = "windows"),
+    windows_subsystem = "windows"
+)]
 
 fn main() {
     linkpad::app::app_main();

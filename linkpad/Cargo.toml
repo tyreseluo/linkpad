@@ -4,6 +4,9 @@ edition     = { workspace = true }
 license     = { workspace = true }
 version     = { workspace = true }
 
+[features]
+default = ["hide_windows_console"]
+hide_windows_console = []
 
 [dependencies]
 linkpad-core       = { workspace = true }
@@ -35,3 +38,11 @@ out_dir = "./dist"
 
 [package.metadata.packager.macos]
 signing_identity = "-"
+
+## Configuration for `cargo packager`'s generation of a Windows `.exe` setup installer.
+[package.metadata.packager.nsis]
+## See this: <https://nsis.sourceforge.io/Docs/Chapter4.html#varconstant>
+appdata_paths = [
+    "$APPDATA/$PUBLISHER/$PRODUCTNAME",
+    "$LOCALAPPDATA/$PRODUCTNAME",
+]
